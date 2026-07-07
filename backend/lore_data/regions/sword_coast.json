@@ -1,0 +1,146 @@
+{
+  "region": "Sword Coast",
+  "locations": [
+    {
+      "key": "waterdeep",
+      "name_en": "Waterdeep",
+      "tags": [
+        "city",
+        "port",
+        "trade",
+        "guild",
+        "harbor",
+        "noble",
+        "market"
+      ],
+      "description": "A sprawling walled port city on the Sword Coast, ruled in secret by masked Lords. Wealthy, crowded, and dangerous in equal measure, with guildhalls, noble estates, and the notorious dungeon Undermountain beneath it."
+    },
+    {
+      "key": "undermountain",
+      "name_en": "Undermountain",
+      "tags": [
+        "dungeon",
+        "ruins",
+        "underground",
+        "monster",
+        "trap",
+        "cave"
+      ],
+      "description": "A vast, ever-shifting megadungeon beneath Waterdeep, riddled with traps, monsters, and the remnants of a mad wizard's experiments. Adventurers who go too deep rarely return unchanged."
+    },
+    {
+      "key": "baldurs_gate",
+      "name_en": "Baldur's Gate",
+      "tags": [
+        "city",
+        "port",
+        "trade",
+        "crime",
+        "faction",
+        "river"
+      ],
+      "description": "A fortified river-port city south of Waterdeep, run by a merchant council and riddled with rival factions, smugglers, and cults operating just beneath the surface of respectable trade."
+    }
+  ],
+  "creature_tiers": {
+    "low": [
+      "street thugs",
+      "pickpockets",
+      "aggressive stray dogs",
+      "drunk brawlers"
+    ],
+    "medium": [
+      "bandit raiders",
+      "cutpurse gang with a hired thug",
+      "cultist cell",
+      "corrupt guards"
+    ],
+    "high": [
+      "a crime lord's elite enforcers",
+      "a rogue mage hiding in the sewers",
+      "an ambitious guild assassin"
+    ]
+  },
+  "npc_archetypes": [
+    {
+      "key": "corrupt_dockmaster",
+      "role": "corrupt dockmaster",
+      "tags": [
+        "harbor",
+        "smuggling",
+        "bribe",
+        "port",
+        "guard"
+      ],
+      "description": "Controls who gets a berth in the harbor and who gets 'inspected' for hours. Takes bribes openly and remembers every favor owed.",
+      "name_pool": [
+        "Harlan Voss",
+        "Dorric Fenn",
+        "Bryn Osgood",
+        "Wexley Tarn"
+      ]
+    },
+    {
+      "key": "fence_broker",
+      "role": "fence and information broker",
+      "tags": [
+        "black market",
+        "information",
+        "thief",
+        "guild",
+        "secrets"
+      ],
+      "description": "Runs a curio shop that is really a front for moving stolen goods and rumors. Never raises their voice, never forgets a debt.",
+      "name_pool": [
+        "Tallis Nireth",
+        "Sabra Quill",
+        "Merek Dosk",
+        "Ilona Vray"
+      ]
+    },
+    {
+      "key": "watch_captain",
+      "role": "city watch captain",
+      "tags": [
+        "guard",
+        "law",
+        "watch",
+        "patrol",
+        "authority"
+      ],
+      "description": "A blunt, overworked watch captain trying to keep order in a city that profits from disorder. Suspicious of adventurers, but pragmatic about using them.",
+      "name_pool": [
+        "Captain Orvasht",
+        "Captain Kaelin Dray",
+        "Captain Ressa Vale",
+        "Captain Aldous Fenn"
+      ]
+    }
+  ],
+  "weather_pool": [
+    {
+      "weather": "Clear skies",
+      "weight": 4
+    },
+    {
+      "weather": "Overcast",
+      "weight": 3
+    },
+    {
+      "weather": "Light rain",
+      "weight": 3
+    },
+    {
+      "weather": "Heavy rain and wind",
+      "weight": 2
+    },
+    {
+      "weather": "Coastal fog rolling in",
+      "weight": 2
+    },
+    {
+      "weather": "Strong sea wind",
+      "weight": 2
+    }
+  ]
+}

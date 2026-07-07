@@ -1,0 +1,140 @@
+{
+  "region": "Moonshae Isles",
+  "locations": [
+    {
+      "key": "caer_corwell",
+      "name_en": "Caer Corwell",
+      "tags": [
+        "castle",
+        "village",
+        "coast",
+        "lord",
+        "clan"
+      ],
+      "description": "A modest stone keep overlooking a fishing village, seat of a minor island lord. Storms roll in off the sea often enough that no one plans a festival without a backup date."
+    },
+    {
+      "key": "druid_grove",
+      "name_en": "a sacred druid grove",
+      "tags": [
+        "forest",
+        "druid",
+        "sacred",
+        "ritual",
+        "nature"
+      ],
+      "description": "An ancient standing-stone grove tended by druids who serve the old earthmother faith. Outsiders are watched closely and welcomed rarely."
+    },
+    {
+      "key": "sea_cave",
+      "name_en": "a tidal sea cave",
+      "tags": [
+        "cave",
+        "coast",
+        "smuggler",
+        "monster",
+        "tide"
+      ],
+      "description": "A cave that floods completely at high tide, used by smugglers who know the timing and drowned by those who don't."
+    }
+  ],
+  "creature_tiers": {
+    "low": [
+      "reef pirates' scouts",
+      "wild dogs",
+      "petty smugglers"
+    ],
+    "medium": [
+      "a band of raiders from the sea",
+      "a corrupted nature spirit",
+      "hostile clan warriors"
+    ],
+    "high": [
+      "a sea hag",
+      "an ancient kraken's lesser spawn",
+      "a vengeful drowned spirit lord"
+    ]
+  },
+  "npc_archetypes": [
+    {
+      "key": "island_lord",
+      "role": "island lord",
+      "tags": [
+        "lord",
+        "castle",
+        "leader",
+        "clan",
+        "politics"
+      ],
+      "description": "Rules a small island holding fairly but nervously, caught between old clan rivalries and pressure from lords on richer islands.",
+      "name_pool": [
+        "Lord Kendric Ap Rhu",
+        "Lord Bracken Tidewell",
+        "Lady Morwen Stormcairn",
+        "Lord Ossian Greymantle"
+      ]
+    },
+    {
+      "key": "grove_druid",
+      "role": "grove druid",
+      "tags": [
+        "druid",
+        "nature",
+        "ritual",
+        "sacred",
+        "warning"
+      ],
+      "description": "Speaks for an ancient grove and the old faith. Views the clans' feuding with weary patience and the sea's rising storms with real alarm.",
+      "name_pool": [
+        "Ffion Stormsong",
+        "Rowan Mistvale",
+        "Senna Oakwhisper",
+        "Cade Thistledown"
+      ]
+    },
+    {
+      "key": "village_fisher",
+      "role": "village fisherman",
+      "tags": [
+        "village",
+        "coast",
+        "fishing",
+        "rumor",
+        "local"
+      ],
+      "description": "Knows every current, reef, and rumor along the coast. Will trade information for ale and a patient ear.",
+      "name_pool": [
+        "Old Cardock",
+        "Fenwick Tideborn",
+        "Maren Saltcastle",
+        "Dougal Wavebrook"
+      ]
+    }
+  ],
+  "weather_pool": [
+    {
+      "weather": "Clear skies",
+      "weight": 3
+    },
+    {
+      "weather": "Overcast",
+      "weight": 3
+    },
+    {
+      "weather": "Rolling sea fog",
+      "weight": 3
+    },
+    {
+      "weather": "A storm brewing off the sea",
+      "weight": 2
+    },
+    {
+      "weather": "Light drizzle",
+      "weight": 2
+    },
+    {
+      "weather": "Strong coastal wind",
+      "weight": 3
+    }
+  ]
+}

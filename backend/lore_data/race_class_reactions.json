@@ -1,0 +1,113 @@
+{
+  "race_reactions": {
+    "Human": {
+      "reputation": "The default face of civilization across the Realms — humans run most cities, guilds, and thrones, so a human draws little special attention either way.",
+      "favorable_with": "merchants, city officials, and most common folk who see a human as unremarkable and easy to trust",
+      "unfavorable_with": "isolationist elves or dwarves who quietly consider humans short-sighted and grasping"
+    },
+    "Elf": {
+      "reputation": "Graceful, long-lived, and often aloof — respected for wisdom and skill, but sometimes resented for a perceived condescension toward shorter-lived races.",
+      "favorable_with": "druids, rangers, scholars, and other elves, who find common ground in patience and reverence for nature or lore",
+      "unfavorable_with": "xenophobic rural humans and some dwarven traditionalists carrying old grudges from ancient conflicts"
+    },
+    "Dwarf": {
+      "reputation": "Blunt, proud, and known for craftsmanship and stubbornness — trusted with a handshake once earned, but slow to give that trust.",
+      "favorable_with": "guild artisans, miners, and fellow dwarves, who respect plain speech and a job done right",
+      "unfavorable_with": "some elves due to old grudges, and slick nobles/con-artists who find dwarves impossible to swindle"
+    },
+    "Halfling": {
+      "reputation": "Small, unassuming, and easy to underestimate — often overlooked in a room, which they've learned to use to their advantage.",
+      "favorable_with": "innkeepers, merchants, and common folk who find halflings disarming and easy to like",
+      "unfavorable_with": "paranoid guards and nobles who've been burned by a halfling's light fingers before"
+    },
+    "Half-Orc": {
+      "reputation": "Judged on sight by many before they've said a word — assumed brutish or dangerous, which some resent and some learn to use.",
+      "favorable_with": "mercenary companies, frontier folk, and those who judge by deeds rather than blood",
+      "unfavorable_with": "city guards quick to suspicion, and prejudiced nobles or merchants who won't hide their unease"
+    },
+    "Tiefling": {
+      "reputation": "Infernal blood shows in horns or eyes that unsettle the superstitious — treated with suspicion in devout or rural areas, more readily accepted in cosmopolitan cities.",
+      "favorable_with": "cosmopolitan city-dwellers, rogues' guilds, and other outcasts who don't judge by appearance",
+      "unfavorable_with": "devout temple-goers and superstitious villagers who mutter about ill omens"
+    },
+    "Dragonborn": {
+      "reputation": "Rare enough in most regions to draw stares and whispers — respected for evident strength and draconic heritage, but rarely well understood by locals.",
+      "favorable_with": "soldiers, warriors, and those who respect martial bearing and honor",
+      "unfavorable_with": "superstitious rural folk unsettled by their draconic appearance and unfamiliar customs"
+    },
+    "Gnome": {
+      "reputation": "Curious, quick-witted, and often assumed to be tinkering with something — welcomed by those who value cleverness, dismissed as odd by the humorless.",
+      "favorable_with": "artificers, scholars, and merchants who appreciate a clever mind and quick tongue",
+      "unfavorable_with": "rigid traditionalists and military types impatient with gnomish tangents and gadgetry"
+    }
+  },
+
+  "class_reactions": {
+    "Fighter": {
+      "reputation": "A plain, trusted martial profession — city guards and soldiers see a fighter as one of their own.",
+      "favorable_with": "city watch, mercenary companies, and soldiers who respect trained steel",
+      "unfavorable_with": "criminal elements wary of someone who can actually fight back"
+    },
+    "Wizard": {
+      "reputation": "Arcane learning draws both respect and unease — scholars admire it, common folk often fear what they don't understand.",
+      "favorable_with": "scholars, sages, and other arcane practitioners eager to talk shop",
+      "unfavorable_with": "superstitious commoners and some temples wary of unregulated arcane power"
+    },
+    "Rogue": {
+      "reputation": "Assumed to have sticky fingers whether deserved or not — merchants watch their purses, but the criminal underworld sees a potential peer.",
+      "favorable_with": "thieves' guilds, fences, and information brokers who speak the same language",
+      "unfavorable_with": "merchants, nobles, and guards who assume the worst on sight"
+    },
+    "Cleric": {
+      "reputation": "A visible servant of the divine — treated with the respect (or wariness) owed to their faith's local standing.",
+      "favorable_with": "temple-goers, the faithful, and those in need of healing or blessing",
+      "unfavorable_with": "rival faiths' devotees, or the irreligious who find divine authority overbearing"
+    },
+    "Ranger": {
+      "reputation": "At home in the wild more than the city — trusted as a guide, viewed as an outsider by court society.",
+      "favorable_with": "hunters, druids, foresters, and rural folk who value wilderness know-how",
+      "unfavorable_with": "city nobles who find rangers uncouth and unpolished"
+    },
+    "Bard": {
+      "reputation": "Charming and quick with words — welcomed in taverns and courts alike, but not always taken seriously.",
+      "favorable_with": "innkeepers, performers, and nobles fond of entertainment and gossip",
+      "unfavorable_with": "stern military types who see bards as unserious distractions"
+    },
+    "Paladin": {
+      "reputation": "A visible symbol of a sworn oath — inspires trust among the devout and law-abiding, and discomfort among those with something to hide.",
+      "favorable_with": "temple-goers, the lawful, and those seeking a champion for their cause",
+      "unfavorable_with": "criminals, cultists, and anyone currently breaking a law the paladin might notice"
+    },
+    "Warlock": {
+      "reputation": "Power from an unseen patron unsettles nearly everyone who learns of it — kept quiet by the wise, feared when discovered.",
+      "favorable_with": "occultists, fellow warlocks, and those desperate enough to seek forbidden power themselves",
+      "unfavorable_with": "temples, paladins, and anyone suspicious of pacts with otherworldly beings"
+    },
+    "Barbarian": {
+      "reputation": "Untamed strength from beyond the city walls — respected in a fight, viewed as uncivilized in a drawing room.",
+      "favorable_with": "frontier folk, mercenaries, and those who value raw strength and honesty",
+      "unfavorable_with": "courtly nobles who find barbarian bluntness embarrassing or crude"
+    },
+    "Druid": {
+      "reputation": "A voice for nature in a world of cities — deeply respected in rural and wild communities, alien to urban sensibilities.",
+      "favorable_with": "rural folk, rangers, and other druids who share reverence for the natural order",
+      "unfavorable_with": "industrious merchants and nobles whose interests often conflict with nature's"
+    },
+    "Sorcerer": {
+      "reputation": "Magic in the blood rather than from study — treated much like a wizard by most, though some see innate power as less trustworthy than learned discipline.",
+      "favorable_with": "arcane scholars curious about their bloodline, and fellow sorcerers",
+      "unfavorable_with": "traditionalist wizards who consider innate magic undisciplined, and superstitious commoners"
+    },
+    "Monk": {
+      "reputation": "Disciplined and unarmed but clearly dangerous — respected by those who value self-mastery, misunderstood by those expecting a sword.",
+      "favorable_with": "monasteries, disciplined soldiers, and those who respect quiet self-control",
+      "unfavorable_with": "brash duelists who underestimate an unarmed opponent, to their later regret"
+    }
+  },
+
+  "default_reaction": {
+    "reputation": "An uncommon sight in these lands — most locals aren't quite sure what to make of them, reacting with curiosity more than judgment.",
+    "favorable_with": "the open-minded and the curious",
+    "unfavorable_with": "the deeply traditional and the easily unsettled by the unfamiliar"
+  }
+}

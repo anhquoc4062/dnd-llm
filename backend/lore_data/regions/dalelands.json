@@ -1,0 +1,140 @@
+{
+  "region": "Dalelands",
+  "locations": [
+    {
+      "key": "shadowdale",
+      "name_en": "Shadowdale",
+      "tags": [
+        "village",
+        "forest",
+        "magic",
+        "quiet",
+        "border"
+      ],
+      "description": "A quiet farming dale bordering old, magic-touched woods, with a history of drawing far more danger than its peaceful fields would suggest."
+    },
+    {
+      "key": "old_barrow",
+      "name_en": "an old burial barrow",
+      "tags": [
+        "ruins",
+        "undead",
+        "tomb",
+        "ancient",
+        "cursed"
+      ],
+      "description": "A grass-covered mound hiding a much older tomb beneath it. Farmers plow around it out of superstition that has proven right more than once."
+    },
+    {
+      "key": "trade_road_inn",
+      "name_en": "a trade-road wayside inn",
+      "tags": [
+        "inn",
+        "road",
+        "travelers",
+        "rumor",
+        "rest"
+      ],
+      "description": "A crossroads inn that sees every kind of traveler on the road between dales. The innkeeper hears more secrets than the local temple."
+    }
+  ],
+  "creature_tiers": {
+    "low": [
+      "highwaymen",
+      "wild boars",
+      "opportunistic thieves"
+    ],
+    "medium": [
+      "a band of armed bandits",
+      "restless undead from the old barrow",
+      "a rogue druid gone feral"
+    ],
+    "high": [
+      "an ancient barrow wight",
+      "a corrupted treant",
+      "a fallen knight bound in cursed armor"
+    ]
+  },
+  "npc_archetypes": [
+    {
+      "key": "wayside_innkeeper",
+      "role": "innkeeper",
+      "tags": [
+        "inn",
+        "rumor",
+        "travelers",
+        "information",
+        "local"
+      ],
+      "description": "Runs a crossroads inn with a firm hand and a sharper memory, and always knows who passed through and what they were nervous about.",
+      "name_pool": [
+        "Marta Hollowell",
+        "Osric Greenbottle",
+        "Wynne Applecross",
+        "Bartram Loamfield"
+      ]
+    },
+    {
+      "key": "traveling_scholar",
+      "role": "traveling scholar",
+      "tags": [
+        "scholar",
+        "lore",
+        "magic",
+        "ruins",
+        "knowledge"
+      ],
+      "description": "An eager, underfunded scholar chasing rumors of some old ruin's contents, more curious than cautious about what might still be guarding it.",
+      "name_pool": [
+        "Perrin Oakhollow",
+        "Delia Runecastle",
+        "Ambrose Thistlewick",
+        "Lyra Quillfeather"
+      ]
+    },
+    {
+      "key": "local_farmer",
+      "role": "local farmer",
+      "tags": [
+        "village",
+        "farmer",
+        "local",
+        "rumor",
+        "harvest"
+      ],
+      "description": "Lost livestock to something from the woods last season and hasn't stopped talking about it since. Grateful for anyone willing to listen, or help.",
+      "name_pool": [
+        "Goodwife Enna",
+        "Farmer Talbot Reed",
+        "Goodwife Marlowe",
+        "Farmer Osgood Vance"
+      ]
+    }
+  ],
+  "weather_pool": [
+    {
+      "weather": "Clear skies",
+      "weight": 4
+    },
+    {
+      "weather": "Overcast",
+      "weight": 3
+    },
+    {
+      "weather": "Light rain",
+      "weight": 2
+    },
+    {
+      "weather": "Rolling thunderstorm",
+      "weight": 2
+    },
+    {
+      "weather": "Morning mist over the dale",
+      "weight": 3
+    },
+    {
+      "weather": "Calm and mild",
+      "weight": 3
+    }
+  ]
+}

@@ -1,0 +1,141 @@
+{
+  "region": "Cormyr",
+  "locations": [
+    {
+      "key": "suzail",
+      "name_en": "Suzail",
+      "tags": [
+        "city",
+        "capital",
+        "castle",
+        "noble",
+        "royal",
+        "port"
+      ],
+      "description": "The royal capital of Cormyr, a walled city of broad avenues and old money, dominated by the royal palace and the ever-present eyes of the Purple Dragons."
+    },
+    {
+      "key": "kings_forest",
+      "name_en": "the King's Forest",
+      "tags": [
+        "forest",
+        "wilderness",
+        "hunt",
+        "bandit",
+        "ruins"
+      ],
+      "description": "An ancient royal forest, officially protected and unofficially full of poachers, bandits, and older things that predate the crown's claim to the land."
+    },
+    {
+      "key": "old_manor",
+      "name_en": "a crumbling border manor",
+      "tags": [
+        "ruins",
+        "manor",
+        "haunted",
+        "noble",
+        "abandoned"
+      ],
+      "description": "A once-grand manor house near the forest's edge, abandoned after its noble family fell from favor. Locals say the windows still light up on the coldest nights."
+    }
+  ],
+  "creature_tiers": {
+    "low": [
+      "poachers",
+      "wild boars",
+      "petty bandits"
+    ],
+    "medium": [
+      "a bandit captain and crew",
+      "a corrupt noble's hired blades",
+      "a pack of dire wolves"
+    ],
+    "high": [
+      "a rogue war mage",
+      "an ancient forest guardian gone hostile",
+      "a noble house's monstrous pet"
+    ]
+  },
+  "npc_archetypes": [
+    {
+      "key": "town_magistrate",
+      "role": "town magistrate",
+      "tags": [
+        "law",
+        "judge",
+        "authority",
+        "noble",
+        "corruption"
+      ],
+      "description": "Dispenses the king's justice with visible reluctance whenever the accused has money or a title. Everyone knows it; no one can prove it.",
+      "name_pool": [
+        "Magistrate Aldwin Faer",
+        "Magistrate Corin Blackwood",
+        "Magistrate Elowen Ashgrove",
+        "Magistrate Percival Dunmore"
+      ]
+    },
+    {
+      "key": "royal_forester",
+      "role": "royal forester",
+      "tags": [
+        "ranger",
+        "forest",
+        "patrol",
+        "hunter",
+        "law"
+      ],
+      "description": "Patrols the King's Forest against poachers and worse. Blunt, tireless, and quietly furious that the crown sends too few rangers to actually cover the ground.",
+      "name_pool": [
+        "Ranger Sable Thorn",
+        "Ranger Cassian Wren",
+        "Ranger Briony Hale",
+        "Ranger Tomlin Ashe"
+      ]
+    },
+    {
+      "key": "minor_noble_debtor",
+      "role": "minor noble with debts",
+      "tags": [
+        "noble",
+        "debt",
+        "secrets",
+        "manor",
+        "politics"
+      ],
+      "description": "Clings to the appearance of old wealth while quietly selling off heirlooms to cover gambling debts. Desperate enough to hire adventurers for jobs she can't explain.",
+      "name_pool": [
+        "Lady Iselle Varn",
+        "Lord Edmund Rosscliffe",
+        "Lady Marguerite Solane",
+        "Lord Peverell Ashcombe"
+      ]
+    }
+  ],
+  "weather_pool": [
+    {
+      "weather": "Clear skies",
+      "weight": 4
+    },
+    {
+      "weather": "Overcast",
+      "weight": 3
+    },
+    {
+      "weather": "Light rain",
+      "weight": 2
+    },
+    {
+      "weather": "Rolling thunderstorm",
+      "weight": 2
+    },
+    {
+      "weather": "Morning mist over the fields",
+      "weight": 2
+    },
+    {
+      "weather": "Warm and still",
+      "weight": 2
+    }
+  ]
+}

@@ -1,0 +1,140 @@
+{
+  "region": "Icewind Dale",
+  "locations": [
+    {
+      "key": "ten_towns",
+      "name_en": "Ten-Towns",
+      "tags": [
+        "village",
+        "frontier",
+        "fishing",
+        "cold",
+        "isolated"
+      ],
+      "description": "A scattering of hardscrabble fishing and trading settlements around Lac Dinneshere, hemmed in by tundra, glaciers, and things that hunt in the long winter dark."
+    },
+    {
+      "key": "kelvins_cairn",
+      "name_en": "Kelvin's Cairn",
+      "tags": [
+        "mountain",
+        "cave",
+        "wilderness",
+        "monster",
+        "climb"
+      ],
+      "description": "The only mountain for miles around, honeycombed with caves. Locals avoid its upper slopes after dark for reasons they don't like to discuss."
+    },
+    {
+      "key": "reghed_camp",
+      "name_en": "a Reghed barbarian camp",
+      "tags": [
+        "camp",
+        "tribe",
+        "barbarian",
+        "wilderness",
+        "hunt"
+      ],
+      "description": "A cluster of hide tents belonging to a proud, insular barbarian tribe that survives by hunting and raiding. Outsiders are tolerated only if they prove useful."
+    }
+  ],
+  "creature_tiers": {
+    "low": [
+      "hungry wolves",
+      "frost-bitten scavengers",
+      "ice-crusted goblins"
+    ],
+    "medium": [
+      "a yeti",
+      "a pack of winter wolves",
+      "raiding barbarians from a rival tribe"
+    ],
+    "high": [
+      "a young white dragon",
+      "a remorhaz",
+      "an ancient frost spirit"
+    ]
+  },
+  "npc_archetypes": [
+    {
+      "key": "town_elder",
+      "role": "town elder",
+      "tags": [
+        "elder",
+        "leader",
+        "village",
+        "advice",
+        "wisdom"
+      ],
+      "description": "The oldest living resident of Ten-Towns, consulted whenever a decision is too dangerous for anyone else to make. Speaks rarely, but is always listened to.",
+      "name_pool": [
+        "Elder Muirna",
+        "Elder Torvald",
+        "Elder Sigrun",
+        "Elder Bregdan"
+      ]
+    },
+    {
+      "key": "trapper_guide",
+      "role": "trapper and guide",
+      "tags": [
+        "hunter",
+        "guide",
+        "wilderness",
+        "tracking",
+        "survival"
+      ],
+      "description": "Knows every safe path through the tundra and every unsafe one too. Will guide travelers for a price, but never after nightfall.",
+      "name_pool": [
+        "Borg Ironhand",
+        "Kelda Frostfoot",
+        "Ranulf Snowarrow",
+        "Ysolde Hark"
+      ]
+    },
+    {
+      "key": "tribal_shaman",
+      "role": "tribal shaman",
+      "tags": [
+        "shaman",
+        "spirit",
+        "ritual",
+        "tribe",
+        "magic"
+      ],
+      "description": "Speaks with the spirits of ice and wind on behalf of her tribe. Views outsiders' magic with deep suspicion, and their disrespect for the land with open contempt.",
+      "name_pool": [
+        "Yelra Frostwhisper",
+        "Haldor Windspeaker",
+        "Sigga Icewalker",
+        "Tormund Hollowbone"
+      ]
+    }
+  ],
+  "weather_pool": [
+    {
+      "weather": "Clear and bitterly cold",
+      "weight": 3
+    },
+    {
+      "weather": "Grey overcast sky",
+      "weight": 3
+    },
+    {
+      "weather": "Steady snowfall",
+      "weight": 3
+    },
+    {
+      "weather": "Blinding blizzard",
+      "weight": 2
+    },
+    {
+      "weather": "Freezing fog",
+      "weight": 2
+    },
+    {
+      "weather": "Harsh, biting wind",
+      "weight": 3
+    }
+  ]
+}

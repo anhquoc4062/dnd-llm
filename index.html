@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dungeon & Dragon</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700;900&family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="background"></div>
+
+<div class="creator">
+
+  <div class="title">
+    <p class="eyebrow">Chương I · Sự Khởi Đầu</p>
+    <h1>⚔️ Khởi Tạo Định Mệnh</h1>
+    <p class="subtitle">Chọn dòng máu, con đường và số phận của bạn — mỗi lựa chọn đều khắc lên số phận nhân vật.</p>
+  </div>
+
+  <div class="layout">
+
+    <!-- LEFT : FORM -->
+    <div class="left-panel">
+
+      <section class="section">
+        <div class="section-head">
+          <span class="section-num">01</span>
+          <h2>Thông Tin</h2>
+        </div>
+        <input id="char-name" class="input" placeholder="Đặt tên cho nhân vật của bạn…" maxlength="24">
+        <div class="pill-group" id="gender-group">
+          <button type="button" class="pill" data-gender="Nam">Nam</button>
+          <button type="button" class="pill" data-gender="Nữ">Nữ</button>
+          <button type="button" class="pill" data-gender="Khác">Khác</button>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <span class="section-num">02</span>
+          <h2>Chủng Tộc</h2>
+        </div>
+        <p class="hint">Chọn 1 — quyết định thiên hướng chỉ số bẩm sinh.</p>
+        <div id="race-container" class="card-grid"></div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <span class="section-num">03</span>
+          <h2>Chức Nghiệp</h2>
+        </div>
+        <p class="hint">Chọn 1 — định hình HP, Mana, kinh nghiệm và lối chiến đấu.</p>
+        <div id="class-container" class="card-grid"></div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <span class="section-num">04</span>
+          <h2>Điểm Mạnh <span class="counter" id="strength-counter">(0/1)</span></h2>
+        </div>
+        <p class="hint">Chọn 1 chủng tộc &amp; chức nghiệp trước để mở khóa 5 điểm mạnh phù hợp.</p>
+        <div id="strength-container" class="trait-list"></div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <span class="section-num">05</span>
+          <h2>Điểm Yếu <span class="counter" id="weakness-counter">(0/1)</span></h2>
+        </div>
+        <p class="hint">Chọn 1 chủng tộc &amp; chức nghiệp trước để mở khóa 5 điểm yếu phù hợp.</p>
+        <div id="weakness-container" class="trait-list"></div>
+      </section>
+
+      <button id="start-btn" onclick="startAdventure()">⚔️ Khởi tạo nhân vật</button>
+      <p id="form-error" class="form-error"></p>
+
+    </div>
+
+    <!-- RIGHT : CHARACTER SHEET -->
+    <div class="right-panel">
+      <div class="sheet">
+
+        <div class="character-card">
+          <div class="avatar" id="avatar">🛡️</div>
+          <h2 id="preview-name">Chưa đặt tên</h2>
+          <div id="preview-class">Chưa có chủng tộc · chức nghiệp</div>
+        </div>
+
+        <div class="stats">
+          <h3>Thông Số</h3>
+          <div class="stat-bar">
+            <div class="stat-bar-label"><span>❤️ HP</span><span id="hp">10</span></div>
+            <div class="bar"><div class="bar-fill hp-fill" id="hp-bar" style="width:100%"></div></div>
+          </div>
+          <div class="stat-bar">
+            <div class="stat-bar-label"><span>🔷 Mana</span><span id="mana">10</span></div>
+            <div class="bar"><div class="bar-fill mana-fill" id="mana-bar" style="width:100%"></div></div>
+          </div>
+          <div class="stat-bar">
+            <div class="stat-bar-label"><span>⭐ XP</span><span id="xp">0 / 100</span></div>
+            <div class="bar"><div class="bar-fill xp-fill" id="xp-bar" style="width:0%"></div></div>
+          </div>
+          <hr>
+          <div class="attr-grid">
+            <div class="attr"><span class="attr-name">STR</span><span class="attr-val" id="str">10</span></div>
+            <div class="attr"><span class="attr-name">DEX</span><span class="attr-val" id="dex">10</span></div>
+            <div class="attr"><span class="attr-name">CON</span><span class="attr-val" id="con">10</span></div>
+            <div class="attr"><span class="attr-name">INT</span><span class="attr-val" id="int">10</span></div>
+            <div class="attr"><span class="attr-name">WIS</span><span class="attr-val" id="wis">10</span></div>
+            <div class="attr"><span class="attr-name">CHA</span><span class="attr-val" id="cha">10</span></div>
+          </div>
+        </div>
+
+        <div class="preview-section">
+          <h3>⚔️ Trang Bị Khởi Đầu</h3>
+          <ul id="equipment-preview"><li class="empty">Chưa xác định</li></ul>
+        </div>
+
+        <div class="preview-section">
+          <h3>✨ Kỹ Năng</h3>
+          <ul id="skill-preview"><li class="empty">Chưa xác định</li></ul>
+        </div>
+
+        <div class="preview-section">
+          <h3>🎒 Vật Phẩm</h3>
+          <ul id="item-preview"><li class="empty">Chưa xác định</li></ul>
+        </div>
+
+        <div id="save-badge" class="save-badge hidden">✅ Nhân vật đã được lưu vào bộ nhớ trình duyệt</div>
+
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="/static/data/game-data.js"></script>
+<script src="/static/script.js"></script>
+</body>
+</html>

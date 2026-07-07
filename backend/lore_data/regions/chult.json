@@ -1,0 +1,140 @@
+{
+  "region": "Chult",
+  "locations": [
+    {
+      "key": "port_nyanzaru",
+      "name_en": "Port Nyanzaru",
+      "tags": [
+        "city",
+        "port",
+        "jungle",
+        "market",
+        "trade"
+      ],
+      "description": "A walled trade city on the edge of the jungle, its markets crowded with merchants, monster hunters, and treasure seekers heading into the wilds beyond the gates."
+    },
+    {
+      "key": "jungle_ruins",
+      "name_en": "overgrown jungle ruins",
+      "tags": [
+        "ruins",
+        "jungle",
+        "trap",
+        "temple",
+        "ancient"
+      ],
+      "description": "The stone bones of a much older civilization, half-swallowed by vines and home to traps, guardians, and treasures that were sealed away for good reason."
+    },
+    {
+      "key": "fetid_swamp",
+      "name_en": "a fetid mangrove swamp",
+      "tags": [
+        "swamp",
+        "jungle",
+        "monster",
+        "disease",
+        "danger"
+      ],
+      "description": "A humid, biting stretch of mangrove and mud where the water is never still for a good reason. Guides charge triple to lead anyone through it."
+    }
+  ],
+  "creature_tiers": {
+    "low": [
+      "giant insects",
+      "venomous snakes",
+      "opportunistic scavengers"
+    ],
+    "medium": [
+      "a pack of raptors",
+      "undead risen from the jungle ruins",
+      "hostile tribal warriors"
+    ],
+    "high": [
+      "a young dinosaur apex predator",
+      "a jungle-dwelling hag",
+      "an ancient temple guardian construct"
+    ]
+  },
+  "npc_archetypes": [
+    {
+      "key": "jungle_guide",
+      "role": "jungle guide",
+      "tags": [
+        "guide",
+        "jungle",
+        "hunter",
+        "survival",
+        "tracking"
+      ],
+      "description": "A scarred, no-nonsense guide who has led more expeditions into the jungle than they can count, and lost more clients than they like to admit.",
+      "name_pool": [
+        "Kesa Two-Blades",
+        "Renn Duskwalker",
+        "Tavo Farshade",
+        "Nyeri Stonepath"
+      ]
+    },
+    {
+      "key": "market_trader",
+      "role": "market trader",
+      "tags": [
+        "market",
+        "trade",
+        "supplies",
+        "information",
+        "rumor"
+      ],
+      "description": "Sells supplies at the edge of the market and rumors on the side, most of them true, all of them exaggerated for effect.",
+      "name_pool": [
+        "Old Sabo",
+        "Rasha Windgold",
+        "Tobin Farwater",
+        "Enu Brightpalm"
+      ]
+    },
+    {
+      "key": "shrine_priest",
+      "role": "temple priest",
+      "tags": [
+        "temple",
+        "healer",
+        "religion",
+        "ritual",
+        "blessing"
+      ],
+      "description": "Tends a small shrine at the city's edge, offering blessings to travelers heading into the jungle. Quietly keeps count of who never comes back.",
+      "name_pool": [
+        "Brother Temu",
+        "Sister Alira Dawnglade",
+        "Brother Kesto Farlight",
+        "Sister Vevina Ashroot"
+      ]
+    }
+  ],
+  "weather_pool": [
+    {
+      "weather": "Humid and clear",
+      "weight": 3
+    },
+    {
+      "weather": "Overcast and sweltering",
+      "weight": 3
+    },
+    {
+      "weather": "Heavy tropical downpour",
+      "weight": 3
+    },
+    {
+      "weather": "Violent thunderstorm",
+      "weight": 2
+    },
+    {
+      "weather": "Thick jungle mist",
+      "weight": 3
+    },
+    {
+      "weather": "Oppressive, still heat",
+      "weight": 2
+    }
+  ]
+}

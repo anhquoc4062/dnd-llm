@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cuộc Phiêu Lưu</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700;900&family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/screen/game/game.css">
+</head>
+<body>
+
+<div class="background"></div>
+
+<div id="layout">
+
+  <!-- ============ GAME ============ -->
+  <div id="game-panel">
+
+    <div class="panel-header">
+      <p class="eyebrow">Chương II · Cuộc Phiêu Lưu</p>
+      <h1 id="story-title">⚔️ Hành Trình Bắt Đầu</h1>
+    </div>
+
+    <div id="chat-container"></div>
+
+    <div id="choices-container"></div>
+
+    <div id="input-container">
+      <input type="text" id="custom-action" placeholder="Nhập hành động của riêng bạn…">
+      <button id="send-btn" onclick="sendCustomAction()">Gửi</button>
+    </div>
+
+  </div>
+
+  <!-- ============ CHARACTER ============ -->
+  <div id="character-panel">
+    <div class="sheet">
+
+      <div class="character-card">
+        <div class="avatar" id="avatar">🛡️</div>
+        <h2 id="char-name">-</h2>
+        <div id="char-subtitle">- · -</div>
+      </div>
+
+      <div class="stats">
+        <div class="stat-row">
+          <div class="stat-chip"><span class="chip-label">Cấp</span><span id="char-level">1</span></div>
+          <div class="stat-chip"><span class="chip-label">Vàng</span><span id="char-gold">0</span>💰</div>
+        </div>
+
+        <div class="stat-bar">
+          <div class="stat-bar-label"><span>⭐ XP</span><span id="char-exp">0 / 100</span></div>
+          <div class="bar"><div class="bar-fill xp-fill" id="xp-bar" style="width:0%"></div></div>
+        </div>
+        <div class="stat-bar">
+          <div class="stat-bar-label"><span>❤️ HP</span><span id="hp-text">100 / 100</span></div>
+          <div class="bar"><div class="bar-fill hp-fill" id="hp-bar" style="width:100%"></div></div>
+        </div>
+        <div class="stat-bar">
+          <div class="stat-bar-label"><span>🔷 Mana</span><span id="mana-text">50 / 50</span></div>
+          <div class="bar"><div class="bar-fill mana-fill" id="mana-bar" style="width:100%"></div></div>
+        </div>
+
+        <hr>
+        <h3>Chỉ Số</h3>
+        <div class="attr-grid">
+          <div class="attr"><span class="attr-name">STR</span><span class="attr-val" id="stat-str">10</span></div>
+          <div class="attr"><span class="attr-name">DEX</span><span class="attr-val" id="stat-dex">10</span></div>
+          <div class="attr"><span class="attr-name">CON</span><span class="attr-val" id="stat-con">10</span></div>
+          <div class="attr"><span class="attr-name">INT</span><span class="attr-val" id="stat-int">10</span></div>
+          <div class="attr"><span class="attr-name">WIS</span><span class="attr-val" id="stat-wis">10</span></div>
+          <div class="attr"><span class="attr-name">CHA</span><span class="attr-val" id="stat-cha">10</span></div>
+        </div>
+      </div>
+
+      <div class="preview-section">
+        <h3>💪 Điểm Mạnh</h3>
+        <ul id="strengths-list"><li class="empty">Không có</li></ul>
+      </div>
+
+      <div class="preview-section">
+        <h3>⚠️ Điểm Yếu</h3>
+        <ul id="weaknesses-list"><li class="empty">Không có</li></ul>
+      </div>
+
+      <div class="preview-section">
+        <h3>⚔️ Trang Bị</h3>
+        <ul id="equipment-list"><li class="empty">Không có</li></ul>
+      </div>
+
+      <div class="preview-section">
+        <h3>✨ Kỹ Năng</h3>
+        <ul id="skills-list"><li class="empty">Không có</li></ul>
+      </div>
+
+      <div class="preview-section">
+        <h3>🎒 Vật Phẩm</h3>
+        <ul id="items-list"><li class="empty">Không có</li></ul>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+<script src="/static/screen/game/game.js"></script>
+</body>
+</html>
