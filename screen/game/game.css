@@ -117,6 +117,7 @@ html, body{
   align-self: flex-start;
   font-style: italic;
   font-size: 18px;
+  font-weight: 500;
 }
 .msg.user{
   background: rgba(202,164,86,0.1);

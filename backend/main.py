@@ -12,10 +12,17 @@ import entities
 import classification
 import world_state
 import social
+import translation
 
 DB_PATH = "game.db"
 MODEL = "qwen3:14b"
-OPTIONS = {"num_ctx": 8192, "num_predict": 800}
+# MODEL = "mistral-small:22b"
+# MODEL = "phi4:14b"
+OPTIONS = {
+    "num_ctx": 16384,
+    "num_predict": 800,
+    "temperature": 0.8,
+}
 
 # MODEL = "mistral-nemo:12b"
 
@@ -190,7 +197,7 @@ def character_row_to_dict(char: sqlite3.Row) -> dict:
         "character_class": char["character_class"],
         "character_class_en": char["character_class_en"] or char["character_class"],
         "region": char["region"] if "region" in char.keys() else None,
-        "npc_pool": _load_json_dict(char["npc_pool"] if "npc_pool" in char.keys() else None),
+        # "npc_pool": _load_json_dict(char["npc_pool"] if "npc_pool" in char.keys() else None),
         "attrs": {
             "str": char["attr_str"],
             "dex": char["attr_dex"],
@@ -425,6 +432,7 @@ Weaknesses: {fmt_traits(c['weaknesses'])}
 Equipment: {fmt_list(c['equipment'])}
 Skills: {fmt_skills(c['skills'])}
 Items: {fmt_list(c['items'])}
+Backstory: <randomly based on class and race, but will impact to the main goal of the campaign>
 
 {social.format_social_context(c['race_en'], c['character_class_en'])}
 
@@ -526,6 +534,17 @@ the character physically is. NEVER move the character backward to a previously r
 location/puzzle/obstacle unless they explicitly choose to retreat. Once a door/lock/trap is
 resolved, it stays resolved — do not reintroduce it. Always advance scene_state forward.
 
+Before narrating a new scene, first imagine an interesting situation rather than a quest.
+
+A good situation should usually contain:
+
+- An opportunity or reward.
+- An obstacle or danger.
+- A mystery, uncertainty, or hidden truth.
+- A source of tension that may worsen if ignored.
+
+The player should immediately want to make a meaningful decision.
+
 ## NARRATION STYLE (story text only)
 - Jump straight into events — sensory detail, action, or world reaction. Do NOT start the story sentence with
   "[CharacterName] + verb" (e.g. "Thorin rút kiếm...", "Elara bước tới...").
@@ -536,6 +555,27 @@ resolved, it stays resolved — do not reintroduce it. Always advance scene_stat
 - BAD openings: "Kael nhìn quanh...", "Bạn cảm thấy lạnh...", "Thorin quyết định..."
 - GOOD openings: "Khói mùi lưu huỳnh bốc lên từ khe đá.", "Mũi kiếm vạt ngang bụng con quái.",
   "Tiếng gõ cửa vang lên — ba nhịp, rồi im bặt."
+
+## ENTITIES (NPCs/monsters) — PERSISTENCE RULES
+- mechanics.entities is OPTIONAL and only needed when: (a) a new NPC/monster appears this
+  turn, or (b) an EXISTING one (listed in ACTIVE ENTITIES context) takes damage/heals/dies/flees.
+- NEW entity: include key (short snake_case, unique), name (English), type ("npc"|"monster"),
+  max_hp, hp (usually = max_hp), hostile (true/false).
+- EXISTING entity (its key already appears in ACTIVE ENTITIES): include ONLY key and
+  hp_change (negative=damage dealt to it, positive=healing). Do NOT re-send max_hp/type/name
+  for existing entities. Add "status": "dead"/"fled" when applicable.
+- Never invent stats for an entity already listed in ACTIVE ENTITIES — use its key as given.
+- Do not use Vietnamese for monster name.
+
+## LOOT — PERSISTENCE RULES
+- mechanics.loot_dropped: only populate when the story text this turn explicitly shows an
+  item becoming available in the world (monster killed and drops something, a chest is
+  opened, an item is found). name = English item name, source_key = the entity key it
+  dropped from (or null if not from a creature).
+- items_added in changes must only reference items that were dropped THIS turn via
+  loot_dropped, OR that already appear in the LOOT AVAILABLE list from context, OR are a
+  direct narrative reward (quest gold/item) clearly justified by the story — never invent
+  combat loot without declaring it via loot_dropped first.
 
 ## LANGUAGE
 Output must be 100% Vietnamese. Never switch to another language for any reason, including
@@ -580,29 +620,6 @@ Only keep monsters and locations name in English.
 }}
 roll must be advantage/disadvantage/normal. If normal, reason is null. If advantage/disadvantage, reason.type is one of attribute/strength/weakness/skill/item, citing exactly one real value from the sheet.
 
-## ENTITIES (NPCs/monsters) — PERSISTENCE RULES
-- mechanics.entities is OPTIONAL and only needed when: (a) a new NPC/monster appears this
-  turn, or (b) an EXISTING one (listed in ACTIVE ENTITIES context) takes damage/heals/dies/flees.
-- NEW entity: include key (short snake_case, unique), name (English), type ("npc"|"monster"),
-  max_hp, hp (usually = max_hp), hostile (true/false).
-- EXISTING entity (its key already appears in ACTIVE ENTITIES): include ONLY key and
-  hp_change (negative=damage dealt to it, positive=healing). Do NOT re-send max_hp/type/name
-  for existing entities. Add "status": "dead"/"fled" when applicable.
-- Never invent stats for an entity already listed in ACTIVE ENTITIES — use its key as given.
-- If nothing changed for entities this turn, entities MUST be [].
-- Any NEW monster's power level must respect the THREAT SCALING guidance given in the
-  WORLD LORE context each turn (region, location type, character level) — never introduce
-  a threat above the allowed tier, and never a random apex/legendary creature.
-
-## LOOT — PERSISTENCE RULES
-- mechanics.loot_dropped: only populate when the story text this turn explicitly shows an
-  item becoming available in the world (monster killed and drops something, a chest is
-  opened, an item is found). name = English item name, source_key = the entity key it
-  dropped from (or null if not from a creature).
-- items_added in changes must only reference items that were dropped THIS turn via
-  loot_dropped, OR that already appear in the LOOT AVAILABLE list from context, OR are a
-  direct narrative reward (quest gold/item) clearly justified by the story — never invent
-  combat loot without declaring it via loot_dropped first.
 
 """
 
@@ -629,7 +646,7 @@ async def chat(data: dict):
     suspicious = _mentions_missing_item(user_input, char_dict)
 
     turns_since_event = char["turns_since_event"] or 0
-    force_event = turns_since_event >= 1  # giảm từ 2 xuống 1 — chỉ cho phép đúng 1 lượt "thở"
+    force_event = turns_since_event >= 2  # giảm từ 2 xuống 1 — chỉ cho phép đúng 1 lượt "thở"
 
     turn_note = f"[STATE] turns_since_major_event={turns_since_event}."
     if force_event:
@@ -752,7 +769,8 @@ async def chat(data: dict):
     # RAG lore context (địa điểm/NPC-archetype/threat-scaling theo region)
     region = char_dict.get("region")
     lore_context = None
-    updated_npc_pool = char_dict.get("npc_pool", {})
+    # updated_npc_pool = char_dict.get("npc_pool", {})
+    updated_npc_pool = {}
     if region:
         last_story = _get_last_story() or ""
         lore_context, updated_npc_pool = lore.format_lore_context(
@@ -961,16 +979,16 @@ async def start_game():
 
     # Ép AI trả về JSON ngay cả trong màn mở đầu
     opening_instruction = f"""
-Start a brand-new Dungeons & Dragons 5e adventure.
+Start a brand-new Dungeons & Dragons 5e campaign.
 This is the opening scene only.
 The adventure takes place in the {region} region of the Forgotten Realms. Start location
 should be a location fitting this region (see WORLD LORE context below for ideas, but you
 may also invent a fitting minor location).
 Open by plunging into the scene — location, atmosphere, or immediate tension first.
-Introduce class/race in passing if needed; NEVER use the character's proper name in story
-text and NEVER address the player as "bạn". Do not open with "[name/class] + verb".
+Introduce the name and class of player, tell about his/her backstory.
+That will impact to the main goal of the campaign.
 All encountered monsters and locations should be in the Forgotten Realms.
-All monster and location names must be English. 
+All monster and location names must be English.
 """
 
     lore_context, initial_npc_pool = lore.format_lore_context(
