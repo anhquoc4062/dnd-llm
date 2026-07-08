@@ -23,10 +23,10 @@ const RACES = [
   { key: 'halfling', id: 'halfling', name: 'Hobbit', en: 'Halfling', icon: '🍀', desc: 'Lanh lợi, may mắn và khéo ăn khéo nói.', bonus: { dex: 3, cha: 2, str: -2 } },
   { key: 'tiefling', id: 'tiefling', name: 'Quỷ Tộc', en: 'Tiefling', icon: '😈', desc: 'Mang dòng máu quỷ dữ, quyến rũ nhưng bị nghi kỵ.', bonus: { cha: 3, int: 2, wis: -1 } },
   { key: 'dragonborn', id: 'dragonborn', name: 'Long Nhân', en: 'Dragonborn', icon: '🐉', desc: 'Hậu duệ rồng thiêng, oai vệ và mạnh mẽ.', bonus: { str: 2, con: 2, cha: 1, dex: -1 } },
-  { key: 'gnome', id: 'gnome', name: 'Người Tí Hon', en: 'Gnome', icon: '🧙', desc: 'Nhỏ bé nhưng cực kỳ thông minh và tò mò.', bonus: { int: 3, dex: 2, str: -2 } },
-  { key: 'half_orc', id: 'half_orc', name: 'Bán Orc', en: 'Half-Orc', icon: '👺', desc: 'Con lai giữa người và orc, mạnh mẽ nhưng bị kỳ thị.', bonus: { str: 3, con: 2, cha: -1 } },
-  { key: 'half_elf', id: 'half_elf', name: 'Bán Tiên', en: 'Half-Elf', icon: '🧝‍♂️', desc: 'Con lai giữa người và tiên, khéo léo và quyến rũ.', bonus: { cha: 3, dex: 2, int: 1, con: -1 } },
-  { key: 'undead', id: 'undead', name: 'Xác Sống', en: 'Undead', icon: '🧟', desc: 'Sinh vật chết sống lại, miễn nhiễm với bệnh tật nhưng sợ ánh sáng.', bonus: { con: 2, int: 1, cha: -5 } }
+  { key: 'gnome', id: 'gnome', name: 'Gnome', en: 'Gnome', icon: '🧙', desc: 'Nhỏ bé nhưng cực kỳ thông minh và tò mò.', bonus: { int: 3, dex: 2, str: -2 } },
+  // { key: 'half_orc', id: 'half_orc', name: 'Bán Orc', en: 'Half-Orc', icon: '👺', desc: 'Con lai giữa người và orc, mạnh mẽ nhưng bị kỳ thị.', bonus: { str: 3, con: 2, cha: -1 } },
+  // { key: 'half_elf', id: 'half_elf', name: 'Bán Tiên', en: 'Half-Elf', icon: '🧝‍♂️', desc: 'Con lai giữa người và tiên, khéo léo và quyến rũ.', bonus: { cha: 3, dex: 2, int: 1, con: -1 } },
+  // { key: 'undead', id: 'undead', name: 'Xác Sống', en: 'Undead', icon: '🧟', desc: 'Sinh vật chết sống lại, miễn nhiễm với bệnh tật nhưng sợ ánh sáng.', bonus: { con: 2, int: 1, cha: -5 } }
 ];
 /* ---------------------------- CHỨC NGHIỆP -------------------------------- */
 const CLASSES = [

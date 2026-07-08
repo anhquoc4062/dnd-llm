@@ -4,16 +4,15 @@
    Dungeon Master conversation through /start_game and /chat.
    ============================================================ */
 
-const CLASS_ICONS = {
-  'Chiến Binh': '🗡️',
-  'Pháp Sư': '🔮',
-  'Đạo Tặc': '🗝️',
-  'Tu Sĩ': '✨',
-  'Du Hành Giả': '🏹',
-  'Man Rợ': '🪓',
-};
-
 function byId(id){ return document.getElementById(id); }
+
+/* RACES/CLASSES đến từ game-data.js (nguồn dữ liệu chung với màn tạo nhân
+   vật) — tra icon theo tên tiếng Việt lưu trong DB, thay vì map riêng dễ lệch
+   khi thêm chủng tộc/chức nghiệp mới. */
+function findIcon(list, name, fallback){
+  const item = (list || []).find(x => x.name === name);
+  return item ? item.icon : fallback;
+}
 
 let isGameOver = false;
 
@@ -48,19 +47,21 @@ function fillList(containerId, items, withNote){
       return `<li>${item.name}<span class="li-note">${item.note || ''}</span></li>`;
     }
 
-    // equipment / skills / items: {key, vi, en}
+    // equipment / skills / items: {key, vi, en, desc}
     if (typeof item === 'object'){
       const viName = item.vi || item.name || '';
       const enName = item.en || '';
       const showEn = enName && enName.toLowerCase() !== viName.toLowerCase();
-      return `<li class="${item.cooldown_current ? 'cooldown' : ''}">${escapeHtml(viName)} ${item.cooldown_current ? `(Còn ${item.cooldown_current} lượt)` : ''} ${showEn ? `<span class="li-note-en">${escapeHtml(enName)}</span>` : ''}</li>`;
+      const tooltipAttr = item.desc ? ` data-tooltip="${escAttr(item.desc)}"` : '';
+      return `<li class="${item.cooldown_current ? 'cooldown' : ''}"${tooltipAttr}>${escapeHtml(viName)} ${item.cooldown_current ? `(Còn ${item.cooldown_current} lượt)` : ''} ${showEn ? `<span class="li-note-en">${escapeHtml(enName)}</span>` : ''}</li>`;
     }
     return `<li>${escapeHtml(item)}</li>`;
   }).join('');
 }
 
 function renderCharacter(char){
-  byId('avatar').textContent = CLASS_ICONS[char.character_class] || '🛡️';
+  byId('avatar-race').textContent = findIcon(typeof RACES !== 'undefined' ? RACES : null, char.race, '🧑');
+  byId('avatar-class').textContent = findIcon(typeof CLASSES !== 'undefined' ? CLASSES : null, char.character_class, '🛡️');
   byId('char-name').textContent = char.name || '-';
   byId('char-subtitle').textContent = `${char.race || '-'} · ${char.character_class || '-'} · ${char.gender || '-'}`;
 
@@ -190,6 +191,17 @@ function escapeHtml(str){
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
+}
+
+/* Riêng cho attribute HTML (vd title="...") — escapeHtml() ở trên KHÔNG escape
+   dấu " vì nó chỉ escape đúng cho text node, không an toàn khi nhét vào giữa
+   một attribute value có dấu ngoặc kép. */
+function escAttr(str){
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function setInputsEnabled(enabled){
