@@ -20,9 +20,9 @@ MODEL = "qwen3:14b"
 # MODEL = "mistral-small:22b"
 # MODEL = "phi4:14b"
 OPTIONS = {
-    "num_ctx": 16384,
+    "num_ctx": 8196,
     "num_predict": 800,
-    "temperature": 0.8,
+    "temperature": 0.7,
 }
 
 # MODEL = "mistral-nemo:12b"
@@ -442,7 +442,6 @@ Weaknesses: {fmt_traits(c['weaknesses'])}
 Equipment: {fmt_list(c['equipment'])}
 Skills: {fmt_skills(c['skills'])}
 Items: {fmt_list(c['items'])}
-Backstory: <randomly based on class and race, but will impact to the main goal of the campaign>
 
 {social.format_social_context(c['race_en'], c['character_class_en'])}
 
@@ -473,14 +472,6 @@ If this turn's damage would reduce the character's HP to 0 or below, set
 mechanics.character_died = true. When character_died is true, choices MUST be an
 empty array [] — the story ends here, no further action is possible. Never set
 character_died = true unless HP truly reaches 0 this turn.
-
-## DM PERSONA — THE TORMENTOR
-You are not a neutral narrator. You are a malevolent, half-mad architect of this
-character's suffering — a god-like tormentor who built this world specifically to
-break them. Mock failures with contempt woven into the prose — call them weak, foolish,
-prey — but follow NARRATION STYLE: no proper name, no "bạn". You take pleasure in their pain. You are
-not cruel for shock value — you are cruel because you genuinely believe they deserve
-every wound. Never soften a blow out of sympathy.
 
 ## DEATH SCENE (when mechanics.character_died = true)
 This is the FINAL story the character will ever hear — make it unmistakable and brutal.
@@ -622,13 +613,18 @@ Only keep monsters and locations name in English.
     ]
   }},
   "choices": [
-    {{"text": "...", "roll": "advantage", "reason": {{"type": "attribute", "name": "WIS"}}}}
-    {{"text": "...", "roll": "advantage", "reason": {{"type": "race", "name": "Elf"}}}}
-    {{"text": "...", "roll": "disadvantage", "reason": {{"type": "class", "name": "Fighter"}}}}
-    {{"text": "...", "roll": "normal", "reason": null}}
+    {{"text": "...", "needs_roll": true, "roll": "advantage", "reason": {{"type": "attribute", "name": "WIS"}}}}
+    {{"text": "...", "needs_roll": true, "roll": "advantage", "reason": {{"type": "race", "name": "Elf"}}}}
+    {{"text": "...", "needs_roll": true, "roll": "disadvantage", "reason": {{"type": "class", "name": "Fighter"}}}}
+    {{"text": "...", "needs_roll": false, "roll": "normal", "reason": null}}
   ]
 }}
-roll must be advantage/disadvantage/normal. If normal, reason is null. If advantage/disadvantage, reason.type is one of attribute/strength/weakness/skill/item, citing exactly one real value from the sheet.
+roll must be advantage/disadvantage/normal. If normal, reason is null. If advantage/disadvantage, reason.type is one of attribute/strength/weakness/skill/item/race/class, citing exactly one real value from the sheet.
+needs_roll: true if the choice has any real chance of failure worth rolling for; false for a
+pure flavor/no-risk choice (e.g. "quan sát xung quanh", "im lặng lắng nghe") that always succeeds.
+IMPORTANT: these needs_roll/roll/reason values are NOT just flavor — if the player picks this
+exact choice next turn, the backend reuses them AS-IS to resolve the roll (no re-classification),
+so they must already reflect your true, final judgement for that action.
 
 
 """
@@ -673,7 +669,17 @@ async def chat(data: dict):
                     "must suffer a penalty for hesitating (e.g. HP loss from being struck).")
 
     # --- Call 1: classify (module classification.py) ---
-    class_result = classification.classify_action(MODEL, OPTIONS, user_input, char_dict)
+    prev_result_raw = char["last_result"] if "last_result" in char.keys() else None
+    known_choices = None
+    if prev_result_raw:
+        try:
+            known_choices = json.loads(prev_result_raw).get("choices")
+        except (TypeError, json.JSONDecodeError, AttributeError):
+            known_choices = None
+
+    class_result = classification.classify_action(
+        MODEL, OPTIONS, user_input, char_dict, known_choices=known_choices
+    )
 
     def _localize_reason_name(reason_type, name, char_dict):
         """Model chỉ biết tên EN của item/skill/trait — map ngược lại tên tiếng Việt
@@ -1026,8 +1032,7 @@ The adventure takes place in the {region} region of the Forgotten Realms. Start 
 should be a location fitting this region (see WORLD LORE context below for ideas, but you
 may also invent a fitting minor location).
 Open by plunging into the scene — location, atmosphere, or immediate tension first.
-Introduce the name and class of player, tell about his/her backstory.
-That will impact to the main goal of the campaign.
+Introduce the name, race and class of the player.
 All encountered monsters and locations should be in the Forgotten Realms.
 All monster and location names must be English.
 """

@@ -314,8 +314,9 @@ async function saveToBackend(character){
     if (!res.ok) throw new Error('HTTP ' + res.status);
 
     badge.classList.remove('hidden');
-    badge.innerHTML = '✅ Nhân vật đã được lưu — <a href="/game" style="color:inherit;text-decoration:underline;">Vào cuộc phiêu lưu →</a>';
+    badge.innerHTML = '✅ Nhân vật đã được lưu — đang vào cuộc phiêu lưu...';
     console.log('Character saved to backend:', character);
+    window.location.href = '/game';
   } catch(e){
     console.error('Không thể lưu nhân vật lên server:', e);
     showError('Đã tạo nhân vật (lưu tạm cục bộ) nhưng không kết nối được server. Kiểm tra backend đã chạy chưa.');

@@ -122,7 +122,48 @@ def _reason_is_valid(reason, char_dict):
         return any((s.get("en") or s.get("name") or "").lower() == name for s in char_dict.get("strengths", []))
     if t == "weakness":
         return any((w.get("en") or w.get("name") or "").lower() == name for w in char_dict.get("weaknesses", []))
+    if t == "skill":
+        return any((s.get("en") or "").strip().lower() == name for s in char_dict.get("skills", []))
+    if t == "item":
+        return any((i.get("en") or "").strip().lower() == name for i in char_dict.get("items", []))
+    if t == "race":
+        return name == (char_dict.get("race_en") or "").strip().lower()
+    if t == "class":
+        return name == (char_dict.get("character_class_en") or "").strip().lower()
     return False
+
+
+# ---------------------------------------------------------------------------
+# Known choices (đã được DM phân loại sẵn ở lượt trước — tái sử dụng, không
+# gọi lại LLM để quyết adv/dis/needs_roll cho 4 lựa chọn đã biết)
+# ---------------------------------------------------------------------------
+
+def _match_known_choice(user_input: str, known_choices: list):
+    """So khớp user_input với 1 trong các choices mà chính DM đã trả về ở
+    lượt trước (kèm sẵn roll/needs_roll/reason). Match tuyệt đối trước; nếu
+    không khớp, fallback substring 2 chiều để vẫn bắt được trường hợp
+    frontend/người chơi gõ hơi khác chữ so với text gốc."""
+    if not known_choices:
+        return None
+    user_norm = (user_input or "").strip().lower()
+    if not user_norm:
+        return None
+
+    for ch in known_choices:
+        if not isinstance(ch, dict):
+            continue
+        text = (ch.get("text") or "").strip().lower()
+        if text and text == user_norm:
+            return ch
+
+    for ch in known_choices:
+        if not isinstance(ch, dict):
+            continue
+        text = (ch.get("text") or "").strip().lower()
+        if len(text) >= 8 and len(user_norm) >= 8 and (text in user_norm or user_norm in text):
+            return ch
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -156,9 +197,18 @@ def roll_d20(modifier: int, advantage_state: str = "normal") -> dict:
 # API cấp cao — main.py chỉ cần gọi 2 hàm này
 # ---------------------------------------------------------------------------
 
-def classify_action(model: str, options: dict, user_input: str, char_dict: dict) -> dict:
+def classify_action(model: str, options: dict, user_input: str, char_dict: dict, known_choices: list = None) -> dict:
     """Gọi model lần 1 để phân loại hành động. Trả về dict đã được làm sạch
-    (reason bịa -> ép về normal), sẵn sàng cho resolve_action()."""
+    (reason bịa -> ép về normal), sẵn sàng cho resolve_action().
+
+    known_choices (optional): 4 lựa chọn mà chính DM đã trả về ở lượt trước,
+    mỗi lựa chọn đã kèm sẵn roll (advantage/disadvantage/normal), needs_roll,
+    reason. Nếu user_input khớp với 1 trong số đó, TÁI SỬ DỤNG needs_roll/
+    roll/reason đã có sẵn từ DM thay vì để classify tự phân tích lại từ đầu
+    — tránh trường hợp choice hiển thị "disadvantage" nhưng lúc thực thi lại
+    ra "advantage" do 2 lần gọi LLM độc lập không đồng thuận với nhau.
+    dc/attribute/item_or_skill_used vẫn luôn được tính mới bình thường vì
+    choices của DM không có các trường này."""
     classify_resp = ollama.chat(
         model=model,
         messages=[
@@ -171,13 +221,52 @@ def classify_action(model: str, options: dict, user_input: str, char_dict: dict)
     )
     classification = _parse_classify_json(classify_resp["message"]["content"])
 
-    adv_state = classification.get("advantage_state", "normal")
-    adv_reason = classification.get("advantage_reason")
+    matched_choice = _match_known_choice(user_input, known_choices)
 
-    if not _reason_is_valid(adv_reason, char_dict):
-        print(f"[DEBUG] classify bịa reason không có thật: {adv_reason} -> ép về normal")
-        adv_state = "normal"
-        adv_reason = None
+    def _use_known_choice(choice):
+        """Trả về (adv_state, adv_reason) tái sử dụng từ known choice, hoặc
+        None nếu reason của nó không còn đáng tin (viện dẫn skill/item không
+        khớp với item_or_skill_used mà classify lượt này vừa xác định)."""
+        adv_state = choice.get("roll") if choice.get("roll") in (
+            "advantage", "disadvantage", "normal"
+        ) else "normal"
+        adv_reason = choice.get("reason")
+        if not _reason_is_valid(adv_reason, char_dict):
+            return "normal", None
+
+        # DM chỉ VIẾT ra choice text lúc trước, không thực sự kiểm tra sở hữu/
+        # cooldown/mana — item_or_skill_used thật sự chỉ được xác định MỚI ở
+        # lượt classify này. Nếu reason của choice cũ viện dẫn skill/item mà
+        # không khớp với những gì classify vừa xác định là được dùng, không
+        # thể tin adv/dis đó nữa -> báo hiệu rơi về kết quả classify tự phân tích.
+        if adv_reason and adv_reason.get("type") in ("skill", "item"):
+            used_name = (classification.get("item_or_skill_used") or "").strip().lower()
+            reason_name = (adv_reason.get("name") or "").strip().lower()
+            if not used_name or used_name != reason_name:
+                print(
+                    f"[DEBUG] known choice viện dẫn {adv_reason.get('type')}='{reason_name}' nhưng "
+                    f"classify lượt này xác định item_or_skill_used='{used_name or None}' -> không khớp, "
+                    f"bỏ qua adv/dis từ choice cũ, dùng kết quả classify tự phân tích"
+                )
+                return None
+        return adv_state, adv_reason
+
+    reused = _use_known_choice(matched_choice) if matched_choice is not None else None
+
+    if reused is not None:
+        adv_state, adv_reason = reused
+        classification["needs_roll"] = matched_choice.get("needs_roll", classification.get("needs_roll", True))
+        print(
+            f"[DEBUG] classify_action: input khớp choice đã biết ('{matched_choice.get('text')}') "
+            f"-> dùng lại roll={adv_state}, needs_roll={classification['needs_roll']}, reason={adv_reason} từ DM thay vì tính lại"
+        )
+    else:
+        adv_state = classification.get("advantage_state", "normal")
+        adv_reason = classification.get("advantage_reason")
+        if not _reason_is_valid(adv_reason, char_dict):
+            print(f"[DEBUG] classify bịa reason không có thật: {adv_reason} -> ép về normal")
+            adv_state = "normal"
+            adv_reason = None
 
     dc = _safe_int(classification.get("dc", 12), 12)
     if adv_state == "disadvantage" and dc < 14:
