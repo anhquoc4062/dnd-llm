@@ -612,9 +612,19 @@ The player should immediately want to make a meaningful decision.
   turn, or (b) an EXISTING one (listed in ACTIVE ENTITIES context) takes damage/heals/dies/flees.
 - NEW entity: include key (short snake_case, unique), name (English), type ("npc"|"monster"),
   max_hp, hp (usually = max_hp), hostile (true/false).
+- NEW hostile monster source: if the CAMPAIGN section above includes a MONSTER ROSTER, a new
+  hostile monster MUST come from that roster (reuse its exact name/appearance/moveset/
+  behavior) — do not default to a generic/unrelated creature out of habit when the roster
+  already has something that fits.
+- CONSISTENCY (critical): the creature/NPC you write into mechanics.entities MUST be the
+  EXACT same creature you just described in the story text this turn — same species/kind,
+  same weapon/method of attack. If the story says a snake bit/coiled around the character,
+  name MUST be a snake (e.g. "Venomous Serpent"), never an unrelated creature like a spider.
+  Never invent a name/species that contradicts what the story prose just narrated.
 - EXISTING entity (its key already appears in ACTIVE ENTITIES): include ONLY key and
   hp_change (negative=damage dealt to it, positive=healing). Do NOT re-send max_hp/type/name
-  for existing entities. Add "status": "dead"/"fled" when applicable.
+  for existing entities. Add "status": "dead"/"fled" when applicable. The story text must
+  keep describing it as the SAME creature it was introduced as — never switch species mid-scene.
 - Never invent stats for an entity already listed in ACTIVE ENTITIES — use its key as given.
 - Do not use Vietnamese for monster name.
 
@@ -771,6 +781,7 @@ async def chat(data: dict):
     roll_type = resolution["roll_type"]
     dice = resolution["dice"]
     dc = resolution["dc"]
+    attribute = resolution["attribute"]
     used_name = resolution["used_name"]
     consumed_kind = resolution["consumed_kind"]
     mana_cost = resolution["mana_cost"]
@@ -922,6 +933,7 @@ async def chat(data: dict):
     if dice:
         result["mechanics"]["dice"] = dice
         result["mechanics"]["dc"] = dc
+        result["mechanics"]["attribute"] = attribute
 
     if "changes" in result["mechanics"]:
         changes = result["mechanics"]["changes"]

@@ -45,10 +45,35 @@ _DEFAULT_CAMPAIGN = {
             "name": "Unknown Informant", "role": "ally",
             "desc": "A cautious contact with fragments of the truth.",
             "personality": "Speaks only in half-truths and riddles, terrified of being overheard.",
+            "appearance": "Gaunt, cloaked figure with ink-stained fingers and a nervous twitch.",
         },
     ],
-    "monsters": ["Cultist", "Shadow Beast", "Corrupted Guardian"],
-    "boss": {"name": "The Awakened One", "desc": "The ancient evil at the heart of the plot."},
+    "monsters": [
+        {
+            "name": "Cultist", "species": "Corrupted human",
+            "appearance": "Robed figure with ritual scars and a hollow, unblinking stare.",
+            "moveset": "Sacrificial dagger stabs, chants that inflict fear at range.",
+            "behavior": "Fanatical, fights to the death, flees only to warn others.",
+        },
+        {
+            "name": "Shadow Beast", "species": "Aberration",
+            "appearance": "A hound-sized mass of writhing black smoke with glowing red eyes.",
+            "moveset": "Lunging bite, brief invisibility, claw swipes that drain vigor.",
+            "behavior": "Stalks silently before ambushing; retreats into darkness when badly hurt.",
+        },
+        {
+            "name": "Corrupted Guardian", "species": "Animated construct",
+            "appearance": "A cracked stone statue fused with pulsing dark veins of corruption.",
+            "moveset": "Slow heavy slams, ground-shaking stomps, brief defensive stone-skin.",
+            "behavior": "Relentless and unthinking, never flees, guards a fixed location.",
+        },
+    ],
+    "boss": {
+        "name": "The Awakened One", "desc": "The ancient evil at the heart of the plot.",
+        "appearance": "A towering, half-formed silhouette of shifting shadow and cracked bone.",
+        "moveset": "Reality-warping strikes, summons minor shadow beasts, a devastating area pulse at low health.",
+        "behavior": "Calm and taunting at first, grows increasingly violent and desperate as it weakens.",
+    },
 }
 
 
@@ -76,18 +101,41 @@ def _normalize_campaign(obj: dict) -> dict:
                     "role": str(n.get("role") or "npc").strip(),
                     "desc": str(n.get("desc") or "").strip(),
                     "personality": str(n.get("personality") or "").strip(),
+                    "appearance": str(n.get("appearance") or "").strip(),
                 })
     if not npcs:
         npcs = _DEFAULT_CAMPAIGN["npcs"]
 
     monsters_raw = obj.get("monsters")
-    monsters = [str(m).strip() for m in monsters_raw if str(m).strip()] if isinstance(monsters_raw, list) else []
+    monsters = []
+    if isinstance(monsters_raw, list):
+        for m in monsters_raw:
+            if isinstance(m, dict) and m.get("name"):
+                monsters.append({
+                    "name": str(m.get("name")).strip(),
+                    "species": str(m.get("species") or "").strip(),
+                    "appearance": str(m.get("appearance") or "").strip(),
+                    "moveset": str(m.get("moveset") or "").strip(),
+                    "behavior": str(m.get("behavior") or "").strip(),
+                })
+            elif isinstance(m, str) and m.strip():
+                # Tương thích ngược: campaign cũ (trước khi có schema chi
+                # tiết) lưu monsters là list chuỗi tên thuần.
+                monsters.append({
+                    "name": m.strip(), "species": "", "appearance": "", "moveset": "", "behavior": "",
+                })
     if not monsters:
         monsters = _DEFAULT_CAMPAIGN["monsters"]
 
     boss_raw = obj.get("boss")
     if isinstance(boss_raw, dict) and boss_raw.get("name"):
-        boss = {"name": str(boss_raw.get("name")).strip(), "desc": str(boss_raw.get("desc") or "").strip()}
+        boss = {
+            "name": str(boss_raw.get("name")).strip(),
+            "desc": str(boss_raw.get("desc") or "").strip(),
+            "appearance": str(boss_raw.get("appearance") or "").strip(),
+            "moveset": str(boss_raw.get("moveset") or "").strip(),
+            "behavior": str(boss_raw.get("behavior") or "").strip(),
+        }
     else:
         boss = _DEFAULT_CAMPAIGN["boss"]
 
@@ -125,6 +173,15 @@ revenge/personal vendetta, cosmic horror/eldritch dread, survival/wilderness dis
 mystery/investigation, war/siege, cursed bloodline/tragedy, rescue/hostage, forbidden
 knowledge/cult. No two seeds may share the same core vibe.
 
+HARD SETTING CONSTRAINT (applies to EVERY seed, no exceptions): this is a D&D 5e MEDIEVAL
+DARK-FANTASY world (Forgotten Realms) — swords, bows, magic, curses, gods, undead, fey,
+aberrations. NEVER introduce sci-fi/technological/modern elements: no robots, holograms,
+simulations, computers/code, lasers/plasma, drones, cyberpunk, or "reality is a simulation/
+matrix" framing. A seed about illusion/false reality/stolen identity must be framed through
+MAGIC (a trickster god's curse, a fey mirror-realm, a mad archmage's dream-prison, a doppelganger
+plot) — never through technology. If you catch yourself writing "hologram", "drone", "code",
+"simulation", "plasma", or similar, stop and reframe it in purely magical/medieval terms.
+
 Every field except "theme" must be written in PLAIN ENGLISH ONLY — no Chinese, no other
 language mixed in, even a single stray word or character.
 
@@ -153,12 +210,28 @@ Each seed is a JSON object with:
 - "npcs": 2-4 objects {{"name": "English Name", "role": "ally|rival|neutral|antagonist",
   "desc": "1 sentence in English — their stake in the plot", "personality": "1 sentence in
   English describing a DISTINCT, specific personality/voice/quirk (not generic) — how they
-  actually talk and behave, so the DM can roleplay them consistently"}}.
-- "monsters": 3-5 English monster/enemy type names thematically fitting this seed's genre
-  (not generic — fit the vibe, e.g. a heist seed leans human guards/constructs/traps, a
-  cosmic horror seed leans aberrations/cultists).
+  actually talk and behave, so the DM can roleplay them consistently", "appearance": "1
+  sentence in English, concrete visual description (build, clothing, notable features, age)
+  so the DM can picture and describe them consistently — not generic ('tall man') but
+  specific ('a wiry old woman with a burn-scarred left hand and a moth-eaten fur collar')"}}.
+- "monsters": 3-5 objects (NOT plain strings) — thematically fitting this seed's genre (not
+  generic — fit the vibe, e.g. a heist seed leans human guards/constructs/traps, a cosmic
+  horror seed leans aberrations/cultists). Each object:
+  {{"name": "English Name", "species": "English, what kind of creature this is (e.g.
+  'undead', 'aberration', 'corrupted animal', 'construct', 'human cultist')", "appearance":
+  "1 sentence English, concrete visual description — size, silhouette, texture, color,
+  distinguishing features", "moveset": "1 sentence English, 2-3 concrete combat
+  actions/attacks it actually uses in a fight (not just 'attacks')", "behavior": "1 sentence
+  English describing its combat temperament/AI (aggressive/cowardly/tactical/mindless,
+  when it flees or presses the attack)"}}.
+  Vary species/silhouette across the monsters within each seed — do not make them all
+  humanoid or all the same creature type.
 - "boss": {{"name": "English Name", "desc": "1-2 sentences in English describing the final
-  confrontation and why they matter to the plot"}}.
+  confrontation and why they matter to the plot", "appearance": "1-2 sentences English,
+  vivid and distinct visual description — this is the campaign's signature image", "moveset":
+  "1-2 sentences English, 2-4 concrete signature attacks/abilities, ideally including
+  something it only does at low HP", "behavior": "1 sentence English describing its combat
+  temperament/tactics and how it changes as the fight progresses"}}.
 
 Output EXACTLY this shape:
 {{"seeds": [
@@ -214,6 +287,12 @@ below — think carefully, then expand it into the SAME structured JSON shape us
 AI-generated campaign seeds, staying faithful to the player's idea (do not replace it with
 something unrelated; fill gaps creatively but keep their core premise intact).
 
+HARD SETTING CONSTRAINT: this is a D&D 5e MEDIEVAL DARK-FANTASY world (Forgotten Realms) —
+swords, bows, magic, curses, gods, undead, fey, aberrations. Even if the player's idea sounds
+sci-fi/modern (e.g. "trapped in a simulation"), you MUST reframe it in purely magical/medieval
+terms (a trickster god's curse, a fey mirror-realm, a mad archmage's dream-prison) — NEVER
+introduce robots, holograms, computers/code, lasers/plasma, drones, or cyberpunk elements.
+
 Every field except "theme" must be written in PLAIN ENGLISH ONLY — no Chinese, no other
 language mixed in, even a single stray word or character.
 
@@ -231,9 +310,19 @@ through play, (2) a PLOT TWIST behind it the player wouldn't guess from the them
 at least one MORAL DILEMMA with no clean right answer. Secret, only the DM reads this.",
 "npcs": [{{"name": "English Name", "role": "ally|rival|neutral|antagonist", "desc": "1
 sentence English — their stake in the plot", "personality": "1 sentence English, a distinct
-specific personality/voice/quirk, not generic"}}],
-"monsters": ["3-5 English monster/enemy type names fitting the idea's genre"],
-"boss": {{"name": "English Name", "desc": "1-2 sentences English"}}}}"""
+specific personality/voice/quirk, not generic", "appearance": "1 sentence English, concrete
+visual description (build, clothing, notable features) so the DM can picture and describe
+them consistently — specific, not generic"}}],
+"monsters": [{{"name": "English Name", "species": "English, what kind of creature (undead,
+aberration, corrupted animal, construct, human cultist, etc.)", "appearance": "1 sentence
+English, concrete visual description", "moveset": "1 sentence English, 2-3 concrete combat
+actions it uses", "behavior": "1 sentence English, its combat temperament/AI"}}] (3-5 objects,
+NOT plain strings, fitting the idea's genre, varied species/silhouette — not all the same
+creature type),
+"boss": {{"name": "English Name", "desc": "1-2 sentences English", "appearance": "1-2
+sentences English, vivid distinct visual description", "moveset": "1-2 sentences English,
+2-4 signature attacks/abilities including one at low HP if fitting", "behavior": "1 sentence
+English, combat temperament/tactics and how it changes as the fight progresses"}}}}"""
 
 
 def expand_custom_seed(user_text: str, model: str = None, options: dict = None) -> dict:
@@ -284,10 +373,25 @@ def format_campaign_context(campaign: dict) -> str:
     npc_lines = "; ".join(
         f"{n['name']} ({n['role']}) — {n['desc']}"
         + (f" [personality: {n['personality']}]" if n.get("personality") else "")
+        + (f" [appearance: {n['appearance']}]" if n.get("appearance") else "")
         for n in campaign["npcs"]
     ) or "None"
-    monster_line = ", ".join(campaign["monsters"]) or "None"
+    monster_lines = "; ".join(
+        f"{m['name']}"
+        + (f" ({m['species']})" if m.get("species") else "")
+        + (f" — appearance: {m['appearance']}" if m.get("appearance") else "")
+        + (f" | moveset: {m['moveset']}" if m.get("moveset") else "")
+        + (f" | behavior: {m['behavior']}" if m.get("behavior") else "")
+        for m in campaign["monsters"]
+    ) or "None"
     boss = campaign["boss"]
+    boss_line = f"{boss['name']} — {boss['desc']}"
+    if boss.get("appearance"):
+        boss_line += f" | appearance: {boss['appearance']}"
+    if boss.get("moveset"):
+        boss_line += f" | moveset: {boss['moveset']}"
+    if boss.get("behavior"):
+        boss_line += f" | behavior: {boss['behavior']}"
 
     return f"""## CAMPAIGN — SECRET MASTER PLAN (never reveal these exact terms/twists directly;
 unfold them naturally through play. This overrides generic scene-by-scene improvisation —
@@ -295,7 +399,13 @@ every scene should serve this arc.)
 Main goal: {campaign['main_goal']}
 Plot — includes a mystery to investigate, a twist, and a moral dilemma; reveal gradually
 through clues/events, never dump as exposition: {campaign['plot']}
-Key NPCs — roleplay each with their given personality CONSISTENTLY whenever they appear, not
-as a generic voice: {npc_lines}
-Preferred monster/enemy types for this campaign's encounters: {monster_line}
-Final boss (only when the story arc is ready to climax): {boss['name']} — {boss['desc']}"""
+Key NPCs — roleplay each with their given personality CONSISTENTLY whenever they appear, and
+describe them using their given appearance (not a generic voice/look): {npc_lines}
+MONSTER ROSTER for this campaign — MANDATORY: whenever a NEW hostile creature needs to
+appear in mechanics.entities, you MUST pick one from this roster (reuse its exact name,
+species, appearance, moveset, behavior) — do NOT invent a generic/unrelated monster (e.g. a
+random "shadow beast" or "goblin") when one of these already fits the scene. Only invent a
+creature outside this roster if the scene truly demands something none of these could
+plausibly be (rare). Once a monster from here is introduced, keep narrating it exactly as
+described — never contradict its species/appearance: {monster_lines}
+Final boss (only when the story arc is ready to climax): {boss_line}"""

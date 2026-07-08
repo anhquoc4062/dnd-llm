@@ -90,7 +90,21 @@ TASK: Read the player's action (may be freely typed in Vietnamese, or a suggeste
 already in Vietnamese). The player will usually refer to skills/items by their Vietnamese
 name (shown before the parentheses above) — match it against that name, but always output
 item_or_skill_used using the ENGLISH name (in parentheses), since that's what the backend
-sheet uses for matching. Determine advantage_state using this EXACT procedure, in order:
+sheet uses for matching.
+
+ATTRIBUTE SELECTION (pick the ONE that actually governs this action — do not default to a
+habitual choice):
+- str: melee force — swinging/thrusting a heavy weapon, breaking/lifting/grappling.
+- dex: finesse/speed — ranged attacks, light-weapon precision strikes, dodging, stealth, acrobatics.
+- con: enduring — resisting poison/fatigue/pain, holding on, surviving harsh conditions.
+- int: knowledge — recalling lore, deciphering, investigating clues, tactical planning.
+- wis: perception/instinct — noticing danger, reading intent, animal handling, willpower.
+- cha: social force — persuading, deceiving, intimidating, performing.
+A plain melee weapon attack (sword/axe/spear thrust or swing) defaults to str unless the
+action explicitly emphasizes speed/precision/finesse (then dex). Never pick an attribute
+just because it was used last turn.
+
+Determine advantage_state using this EXACT procedure, in order:
 1. Does any WEAKNESS directly apply to this action? -> disadvantage, cite it.
 2. Else does any STRENGTH directly apply? -> advantage, cite it.
 3. Else is the relevant attribute notably high (16+) or low (8-) for this action?
