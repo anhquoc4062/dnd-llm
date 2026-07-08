@@ -348,7 +348,7 @@ def resolve_action(classification: dict, char_dict: dict) -> dict:
         success = False if forced_fail else True
         roll_type = adv_state if needs_roll else "normal"
     else:
-        modifier = attr_modifier(char_dict["attrs"].get(attribute, 10))
+        modifier = attr_modifier(char_dict["attrs"].get(attribute, 8))
         dice = roll_d20(modifier, adv_state)
         success = dice["total"] >= dc
         roll_type = adv_state

@@ -263,7 +263,7 @@ async def create_character(data: dict):
     attrs = data.get("attrs", {}) or {}
     hp = safe_int(data.get("hp", 100), 100)
     mana = safe_int(data.get("mana", 50), 50)
-    xp_target = safe_int(data.get("xpTarget", 100), 100)
+    xp_target = safe_int(data.get("xpTarget", 10), 10)
 
     race = data.get("race", "")
     character_class = data.get("class", "")
@@ -293,12 +293,12 @@ async def create_character(data: dict):
         data.get("raceEn") or race,
         character_class,
         data.get("classEn") or character_class,
-        safe_int(attrs.get("str", 10), 10),
-        safe_int(attrs.get("dex", 10), 10),
-        safe_int(attrs.get("con", 10), 10),
-        safe_int(attrs.get("int", 10), 10),
-        safe_int(attrs.get("wis", 10), 10),
-        safe_int(attrs.get("cha", 10), 10),
+        safe_int(attrs.get("str", 8), 8),
+        safe_int(attrs.get("dex", 8), 8),
+        safe_int(attrs.get("con", 8), 8),
+        safe_int(attrs.get("int", 8), 8),
+        safe_int(attrs.get("wis", 8), 8),
+        safe_int(attrs.get("cha", 8), 8),
         hp, hp,        # hp = max_hp lúc mới tạo
         mana, mana,    # mana = max_mana lúc mới tạo
         1,             # level
@@ -478,7 +478,7 @@ This is the FINAL story the character will ever hear — make it unmistakable an
 Requirements:
 - 150-220 words, no choices follow, no ambiguity — the character is unquestionably dead.
 - The tormentor's voice cuts through the final moment — mocking, triumphant, merciless
-  (still no proper name, no "bạn" in narration; scorn is woven into the scene itself).
+  (use {c['name']}, never "bạn", per NARRATION STYLE; scorn is woven into the scene itself).
 - Describe the death itself in full, unflinching physical detail — the wound, the
   failing body, the last sensation before darkness. No fade-to-black, no "everything
   goes dark" cop-out — commit to the visceral moment.
@@ -548,12 +548,13 @@ The player should immediately want to make a meaningful decision.
 
 ## NARRATION STYLE (story text only)
 - Jump straight into events — sensory detail, action, or world reaction. Do NOT start the story sentence with
-  "[CharacterName] + verb" (e.g. "Thorin rút kiếm...", "Elara bước tới...").
+  "[CharacterName] + verb" (e.g. "{c['name']} rút kiếm...").
 - NEVER call the player "bạn" / "you" in story text.
-- When the character must be referenced, use class/race/role or neutral phrasing
-  (e.g. "tên chiến binh", "người lùn", "kẻ lẩn trốn") — sparingly; prefer describing
-  what happens (blade swings, foot slips, door groans) over labeling who acts.
-- BAD openings: "Kael nhìn quanh...", "Bạn cảm thấy lạnh...", "Thorin quyết định..."
+- When the character must be referenced, use their proper name ({c['name']}) — NOT a generic
+  class/race label like "tên chiến binh"/"người lùn"/"kẻ lẩn trốn". Use it sparingly; prefer
+  describing what happens (blade swings, foot slips, door groans) over labeling who acts, but
+  when you do need to name who acts, it's always {c['name']}.
+- BAD openings: "Bạn cảm thấy lạnh...", "Tên chiến binh rút kiếm..." (never lead with name/label + verb).
 - GOOD openings: "Khói mùi lưu huỳnh bốc lên từ khe đá.", "Mũi kiếm vạt ngang bụng con quái.",
   "Tiếng gõ cửa vang lên — ba nhịp, rồi im bặt."
 
@@ -602,7 +603,8 @@ Only keep monsters and locations name in English.
         "type": "monster|npc|companion|object",
         "max_hp": 0,
         "hp": 0,
-        "hostile": false
+        "hostile": false,
+        "status": "alive|dead"
       }}
     ],
     "loot_dropped": [
@@ -877,8 +879,9 @@ async def chat(data: dict):
 
         Describe only the world's reaction.
 
-        NARRATION: Do not use "bạn" or the character's proper name. Do not open with
-        "[name] + verb" — lead with the event/environment/action unfolding.
+        NARRATION: Do not use "bạn". Do not open with "[name] + verb" — lead with the
+        event/environment/action unfolding. When you do need to refer to who acts, use
+        {char_dict['name']}, never a generic class/race label.
 """
     })
 
@@ -1023,6 +1026,7 @@ async def start_game():
     char = get_latest_character()  # reload để có region mới
 
     system_prompt = build_system_prompt(char)
+    opening_char = character_row_to_dict(char)
 
     # Ép AI trả về JSON ngay cả trong màn mở đầu
     opening_instruction = f"""
@@ -1032,7 +1036,19 @@ The adventure takes place in the {region} region of the Forgotten Realms. Start 
 should be a location fitting this region (see WORLD LORE context below for ideas, but you
 may also invent a fitting minor location).
 Open by plunging into the scene — location, atmosphere, or immediate tension first.
-Introduce the name, race and class of the player.
+
+EXCEPTION TO NARRATION STYLE — this opening scene only: within the first couple of
+sentences you MUST explicitly establish, in plain narration or through an NPC/narrator line:
+- the character's name: {opening_char['name']}
+- their race: {opening_char['race']} — describe a concrete visual/physical trait of this race
+  (not just naming it in passing)
+- their class: {opening_char['character_class']} — describe a concrete gear/skill/demeanor
+  detail that signals this class
+Simply using the name later in the scene is NOT enough — race and class must each be
+clearly conveyed, either by stating the word directly or through unmistakable descriptive
+detail a reader would recognize as that race/class. Every later turn goes back to the
+normal NARRATION STYLE (name only, no need to restate race/class).
+
 All encountered monsters and locations should be in the Forgotten Realms.
 All monster and location names must be English.
 """

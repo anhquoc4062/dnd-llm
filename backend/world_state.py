@@ -14,7 +14,11 @@ Thiết kế nhẹ, không cần lịch game phức tạp:
   không cần mở rộng OUTPUT FORMAT.
 """
 
+import json
+import os
 import random
+
+DEBUG_STATE_PATH = os.path.join(os.path.dirname(__file__), "world_state.json")
 
 TIME_PERIODS = [
     ("Dawn", "Bình minh vừa ló dạng, ánh sáng còn yếu và lành lạnh."),
@@ -92,3 +96,28 @@ mà lồng vào câu chuyện. Nếu thời tiết/thời điểm hợp lý ản
 (vd trời tối dễ lẻn hơn, bão dễ trượt chân, sương mù khó ngắm bắn), hãy để điều đó ảnh
 hưởng đến cách bạn miêu tả hệ quả — nhưng đừng bịa thêm cơ chế roll mới, chỉ là màu sắc
 tường thuật."""
+
+
+def write_debug_snapshot(turn_number: int, region: str, weather: str, weather_since_turn: int):
+    """Ghi trạng thái world hiện tại ra world_state.json — CHỈ để debug/check
+    trực tiếp bằng mắt (vd 'sao vẫn thấy Dawn' -> mở file này xem turn_number
+    thực tế là bao nhiêu, có tăng không). KHÔNG phải nguồn sự thật cho game
+    logic — DB (character.weather/weather_since_turn) vẫn là nơi duy nhất
+    được đọc lại để tính toán, tránh rủi ro 2 nguồn dữ liệu lệch nhau nếu ghi
+    file thất bại giữa chừng (vd hết dung lượng đĩa, quyền ghi...)."""
+    period_name, period_desc, is_daytime = get_time_period(turn_number)
+    snapshot = {
+        "turn_number": turn_number,
+        "region": region,
+        "time_period": period_name,
+        "is_daytime": is_daytime,
+        "weather": weather,
+        "weather_since_turn": weather_since_turn,
+        "turns_per_period": TURNS_PER_PERIOD,
+        "period_index": (max(turn_number, 0) // TURNS_PER_PERIOD) % len(TIME_PERIODS),
+    }
+    try:
+        with open(DEBUG_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        print(f"[DEBUG] Không ghi được world_state.json: {e}")
