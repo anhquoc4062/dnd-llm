@@ -148,7 +148,7 @@ function updateCounters(){
 /* ---------------------------- STAT COMPUTATION --------------------------- */
 
 function computeStats(){
-  const attrs = { str:10, dex:10, con:10, int:10, wis:10, cha:10 };
+  const attrs = { str:8, dex:8, con:8, int:8, wis:8, cha:8 };
   let extraHP = 0, extraMana = 0;
 
   const race = RACES.find(r => r.id === state.raceId);
@@ -187,8 +187,8 @@ function recalcAndRender(){
     const el = byId(k);
     el.textContent = attrs[k];
     el.classList.remove('pos', 'neg', 'neutral');
-    if (attrs[k] > 10) el.classList.add('pos');
-    else if (attrs[k] < 10) el.classList.add('neg');
+    if (attrs[k] > 8) el.classList.add('pos');
+    else if (attrs[k] < 8) el.classList.add('neg');
     else el.classList.add('neutral');
   });
   byId('hp').textContent = hp;

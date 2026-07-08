@@ -82,11 +82,11 @@ function renderCharacter(char){
   ['str','dex','con','int','wis','cha'].forEach(k => {
     const el = byId('stat-' + k);
     if (!el) return;
-    const val = attrs[k] ?? 10;
+    const val = attrs[k] ?? 8;
     el.textContent = val;
     el.classList.remove('pos', 'neg', 'neutral');
-    if (val > 10) el.classList.add('pos');
-    else if (val < 10) el.classList.add('neg');
+    if (val > 8) el.classList.add('pos');
+    else if (val < 8) el.classList.add('neg');
     else el.classList.add('neutral');
   });
 

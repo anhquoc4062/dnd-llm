@@ -113,7 +113,8 @@ def format_entities_context(conn: sqlite3.Connection, character_id: int) -> str:
         for e in entities:
             tag = "MONSTER" if e["entity_type"] == "monster" else "NPC"
             hostility = " [hostile]" if e["hostile"] else ""
-            lines.append(f"- key=\"{e['key']}\" [{tag}] {e['name']}: HP {e['hp']}/{e['max_hp']}{hostility}")
+            status = " [status]" if e["status"] else ""
+            lines.append(f"- key=\"{e['key']}\" [{tag}] {e['name']}: HP {e['hp']}/{e['max_hp']}{hostility} STATUS: {status}")
     else:
         lines.append("No NPCs/monsters currently active in the scene.")
 

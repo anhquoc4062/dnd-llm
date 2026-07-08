@@ -13,6 +13,7 @@ import classification
 import world_state
 import social
 import translation
+import summarizer
 
 DB_PATH = "game.db"
 MODEL = "qwen3:14b"
@@ -93,15 +94,24 @@ def init_db():
     # Cho phép nâng cấp DB cũ (được tạo trước khi có race_en/character_class_en)
     # mà không cần xoá file game.db thủ công.
     existing_cols = {row["name"] for row in c.execute("PRAGMA table_info(character)")}
-    int_cols_default_0 = ("turns_since_event", "weather_since_turn")
+    int_cols_default_0 = ("turns_since_event", "weather_since_turn", "current_turn", "summarized_up_to_turn")
     for col in ("race_en", "character_class_en", "turns_since_event", "region", "npc_pool",
-                "last_result", "weather", "weather_since_turn"):
+                "last_result", "weather", "weather_since_turn", "current_turn",
+                "history_summary", "summarized_up_to_turn"):
         if col not in existing_cols:
             if col in int_cols_default_0:
                 c.execute(f"ALTER TABLE character ADD COLUMN {col} INTEGER DEFAULT 0")
             else:
                 c.execute(f"ALTER TABLE character ADD COLUMN {col} TEXT")
     conn.commit()
+
+    # Migration bảng history: thêm cột turn_number (đánh dấu row thuộc turn
+    # nào) — cần cho cơ chế summarization (biết row nào đã gộp vào summary).
+    existing_history_cols = {row["name"] for row in c.execute("PRAGMA table_info(history)")}
+    if "turn_number" not in existing_history_cols:
+        c.execute("ALTER TABLE history ADD COLUMN turn_number INTEGER DEFAULT 0")
+    conn.commit()
+
     conn.close()
 
 
@@ -758,11 +768,9 @@ async def chat(data: dict):
     conn = get_conn()
     c = conn.cursor()
 
-    # turn_number: đếm số lượt user đã có, dùng để đánh dấu last_seen_turn
-    # cho entity (chỉ cần tăng dần, không cần chính xác tuyệt đối)
-    turn_number = c.execute(
-        "SELECT COUNT(*) AS n FROM history WHERE role = 'user'"
-    ).fetchone()["n"] + 1
+    # turn_number: tăng dần từ current_turn đã lưu, dùng để đánh dấu
+    # last_seen_turn cho entity và để summarizer biết turn nào chưa gộp.
+    turn_number = (char["current_turn"] or 0) + 1
 
     entities_context = entities.format_entities_context(conn, char["id"])
 
@@ -802,11 +810,36 @@ async def chat(data: dict):
             conn.commit()
         world_state_context = world_state.format_world_state_context(turn_number, new_weather)
 
+    summarized_up_to_turn = char["summarized_up_to_turn"] or 0
+    history_summary = char["history_summary"] or ""
+
+    # Nếu số turn CHƯA gộp (tính tới trước turn hiện tại) đã vượt ngưỡng ->
+    # tóm tắt lại, đẩy summarized_up_to_turn lên. Làm TRƯỚC khi build context
+    # cho turn hiện tại để cửa sổ verbatim luôn nhỏ gọn.
+    if summarizer.needs_summarization(char["current_turn"] or 0, summarized_up_to_turn):
+        rows_to_fold = c.execute(
+            "SELECT role, content FROM history WHERE turn_number > ? AND turn_number <= ? ORDER BY id ASC",
+            (summarized_up_to_turn, char["current_turn"] or 0),
+        ).fetchall()
+        if rows_to_fold:
+            events_text = summarizer.format_events_for_summarization(rows_to_fold)
+            history_summary = summarizer.update_summary(history_summary, events_text)
+            summarized_up_to_turn = char["current_turn"] or 0
+            c.execute(
+                "UPDATE character SET history_summary = ?, summarized_up_to_turn = ? WHERE id = ?",
+                (history_summary, summarized_up_to_turn, char["id"]),
+            )
+            conn.commit()
+
+    # Chỉ lấy các turn CHƯA gộp vào summary, nguyên văn (thường rất ít dòng
+    # vì vừa tóm tắt xong ở trên nếu cần)
     history_rows = c.execute(
-        "SELECT role, content FROM history ORDER BY id DESC LIMIT 10"
+        "SELECT role, content FROM history WHERE turn_number > ? ORDER BY id ASC",
+        (summarized_up_to_turn,),
     ).fetchall()
     conn.close()
-    history_rows = list(reversed(history_rows))
+
+    summary_context = summarizer.format_summary_context(history_summary)
 
     messages = [{"role": "system", "content": system_prompt}]
     if lore_context:
@@ -815,6 +848,8 @@ async def chat(data: dict):
         messages.append({"role": "user", "content": entities_context})
     if world_state_context:
         messages.append({"role": "user", "content": world_state_context})
+    if summary_context:
+        messages.append({"role": "user", "content": summary_context})
     for row in history_rows:
         messages.append({"role": row["role"], "content": row["content"]})
     messages.append({
@@ -916,11 +951,17 @@ async def chat(data: dict):
 
     conn = get_conn()
     c = conn.cursor()
-    c.execute("INSERT INTO history (role, content) VALUES ('user', ?)", (user_input,))
-    c.execute("INSERT INTO history (role, content) VALUES ('assistant', ?)", (result.get("story", ""),))
     c.execute(
-        "UPDATE character SET last_result = ? WHERE id = ?",
-        (json.dumps(result, ensure_ascii=False), char["id"]),
+        "INSERT INTO history (role, content, turn_number) VALUES ('user', ?, ?)",
+        (user_input, turn_number),
+    )
+    c.execute(
+        "INSERT INTO history (role, content, turn_number) VALUES ('assistant', ?, ?)",
+        (result.get("story", ""), turn_number),
+    )
+    c.execute(
+        "UPDATE character SET last_result = ?, current_turn = ? WHERE id = ?",
+        (json.dumps(result, ensure_ascii=False), turn_number, char["id"]),
     )
     conn.commit()
     conn.close()
@@ -1043,9 +1084,12 @@ All monster and location names must be English.
     conn = get_conn()
     c = conn.cursor()
     # c.execute("INSERT INTO history (role, content) VALUES ('user', ?)", (opening_instruction,))
-    c.execute("INSERT INTO history (role, content) VALUES ('assistant', ?)", (result.get("story", ""),))
     c.execute(
-        "UPDATE character SET last_result = ? WHERE id = ?",
+        "INSERT INTO history (role, content, turn_number) VALUES ('assistant', ?, 0)",
+        (result.get("story", ""),),
+    )
+    c.execute(
+        "UPDATE character SET last_result = ?, current_turn = 0 WHERE id = ?",
         (json.dumps(result, ensure_ascii=False), char["id"]),
     )
     conn.commit()
