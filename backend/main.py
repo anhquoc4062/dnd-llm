@@ -14,6 +14,7 @@ import world_state
 import social
 import translation
 import summarizer
+import campaign
 
 DB_PATH = "game.db"
 MODEL = "qwen3:14b"
@@ -97,7 +98,7 @@ def init_db():
     int_cols_default_0 = ("turns_since_event", "weather_since_turn", "current_turn", "summarized_up_to_turn")
     for col in ("race_en", "character_class_en", "turns_since_event", "region", "npc_pool",
                 "last_result", "weather", "weather_since_turn", "current_turn",
-                "history_summary", "summarized_up_to_turn"):
+                "history_summary", "summarized_up_to_turn", "campaign_theme", "campaign_data"):
         if col not in existing_cols:
             if col in int_cols_default_0:
                 c.execute(f"ALTER TABLE character ADD COLUMN {col} INTEGER DEFAULT 0")
@@ -255,6 +256,34 @@ async def get_game():
 
 
 # ---------------------------------------------------------------------------
+# Campaign seed (khung truyện tổng — main goal/plot/npc/monster/boss cho DM
+# bám theo xuyên suốt ván chơi). Người chơi chỉ thấy "theme"; phần còn lại bị
+# giấu khỏi UI, chỉ gắn vào system prompt cho DM đọc (xem campaign.py).
+# ---------------------------------------------------------------------------
+
+@app.get("/campaign_seeds")
+async def campaign_seeds():
+    """AI tự bịa 5 campaign seed, mỗi cái một 'vị' (thể loại) khác nhau.
+    Trả về ĐẦY ĐỦ dữ liệu (kể cả phần bí mật) — frontend chỉ RENDER field
+    'theme' trong dropdown, giữ nguyên phần còn lại trong state JS để gửi lại
+    lúc tạo nhân vật, không hiển thị gì thêm cho người chơi thấy."""
+    seeds = campaign.generate_campaign_seeds()
+    return {"seeds": seeds}
+
+
+@app.post("/campaign_seed/expand")
+async def campaign_seed_expand(data: dict):
+    """Người chơi tự viết 1 ý tưởng/theme ngắn -> khai triển thành đúng cấu
+    trúc campaign seed (main_goal/plot/npcs/monsters/boss), bám sát ý tưởng
+    gốc thay vì bịa lạc đề."""
+    text = (data.get("text") or "").strip()
+    if not text:
+        return {"error": "Thiếu nội dung kịch bản."}
+    result = campaign.expand_custom_seed(text)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Character creation
 # ---------------------------------------------------------------------------
 
@@ -267,6 +296,13 @@ async def create_character(data: dict):
 
     race = data.get("race", "")
     character_class = data.get("class", "")
+
+    campaign_seed = data.get("campaignSeed")
+    campaign_theme = None
+    campaign_data_json = None
+    if isinstance(campaign_seed, dict):
+        campaign_theme = campaign_seed.get("theme")
+        campaign_data_json = json.dumps(campaign_seed, ensure_ascii=False)
 
     conn = get_conn()
     c = conn.cursor()
@@ -284,8 +320,9 @@ async def create_character(data: dict):
             name, gender, race, race_en, character_class, character_class_en,
             attr_str, attr_dex, attr_con, attr_int, attr_wis, attr_cha,
             hp, max_hp, mana, max_mana, level, xp, xp_target, gold,
-            strengths, weaknesses, equipment, skills, items
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            strengths, weaknesses, equipment, skills, items,
+            campaign_theme, campaign_data
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         data.get("name", ""),
         data.get("gender", ""),
@@ -310,6 +347,8 @@ async def create_character(data: dict):
         _list_json(data.get("equipment")),
         _list_json(data.get("skills")),
         _list_json(data.get("items")),
+        campaign_theme,
+        campaign_data_json,
     ))
 
     conn.commit()
@@ -428,11 +467,19 @@ def build_system_prompt(char: sqlite3.Row) -> str:
                 parts.append(label)
         return "; ".join(p for p in parts if p) or "None"
 
+    campaign_data_raw = char["campaign_data"] if "campaign_data" in char.keys() else None
+    campaign_block = ""
+    if campaign_data_raw:
+        try:
+            campaign_block = campaign.format_campaign_context(json.loads(campaign_data_raw))
+        except (TypeError, json.JSONDecodeError):
+            campaign_block = ""
+
     return f"""/no_think
-    
+
 You are the Dungeon Master for a D&D 5e dark-fantasy solo campaign. Stay in character. Never break the fourth wall, explain your reasoning, or mention being an AI. Output ONLY valid JSON, no markdown, no text outside the JSON.
 
-PRIORITY: Character Sheet > Story Context > D&D 5e Rules > Narrative Quality.
+PRIORITY: Character Sheet > Campaign Seed > Story Context > D&D 5e Rules > Narrative Quality.
 
 ## CHARACTER SHEET (absolute truth — never invent beyond this)
 Name: {c['name']} | Race: {c['race']} | Class: {c['character_class']} | Gender: {c['gender']}
@@ -442,6 +489,8 @@ Weaknesses: {fmt_traits(c['weaknesses'])}
 Equipment: {fmt_list(c['equipment'])}
 Skills: {fmt_skills(c['skills'])}
 Items: {fmt_list(c['items'])}
+
+{campaign_block}
 
 {social.format_social_context(c['race_en'], c['character_class_en'])}
 
@@ -782,41 +831,13 @@ async def chat(data: dict):
 
     entities_context = entities.format_entities_context(conn, char["id"])
 
-    # RAG lore context (địa điểm/NPC-archetype/threat-scaling theo region)
+    # RAG lore context + world state (weather/day-night) TẠM THỜI TẮT — không
+    # build/gọi lore.format_lore_context() hay world_state.roll_weather() nữa,
+    # để model đỡ phải đọc thêm lore mỗi turn (giảm tải context/tốc độ). Bật
+    # lại bằng cách khôi phục khối code cũ (xem git history) khi cần.
     region = char_dict.get("region")
     lore_context = None
-    # updated_npc_pool = char_dict.get("npc_pool", {})
-    updated_npc_pool = {}
-    if region:
-        last_story = _get_last_story() or ""
-        lore_context, updated_npc_pool = lore.format_lore_context(
-            region, f"{last_story} {user_input}",
-            character_level=char_dict["level"], npc_pool=char_dict.get("npc_pool", {}),
-        )
-        # Chỉ ghi DB khi có archetype MỚI được instantiate (tránh write thừa mỗi turn)
-        if updated_npc_pool != char_dict.get("npc_pool", {}):
-            c.execute(
-                "UPDATE character SET npc_pool = ? WHERE id = ?",
-                (json.dumps(updated_npc_pool, ensure_ascii=False), char["id"]),
-            )
-            conn.commit()
-
-    # World state: ngày/đêm (tính thuần từ turn_number) + thời tiết (roll có
-    # trọng số theo region, chỉ đổi sau vài turn — cần persist DB)
     world_state_context = None
-    if region:
-        current_weather = char["weather"] if "weather" in char.keys() else None
-        weather_since_turn = char["weather_since_turn"] if "weather_since_turn" in char.keys() else 0
-        new_weather, new_weather_since_turn = world_state.roll_weather(
-            region, current_weather, weather_since_turn, turn_number
-        )
-        if new_weather != current_weather or new_weather_since_turn != weather_since_turn:
-            c.execute(
-                "UPDATE character SET weather = ?, weather_since_turn = ? WHERE id = ?",
-                (new_weather, new_weather_since_turn, char["id"]),
-            )
-            conn.commit()
-        world_state_context = world_state.format_world_state_context(turn_number, new_weather)
 
     summarized_up_to_turn = char["summarized_up_to_turn"] or 0
     history_summary = char["history_summary"] or ""
@@ -1032,9 +1053,8 @@ async def start_game():
     opening_instruction = f"""
 Start a brand-new Dungeons & Dragons 5e campaign.
 This is the opening scene only.
-The adventure takes place in the {region} region of the Forgotten Realms. Start location
-should be a location fitting this region (see WORLD LORE context below for ideas, but you
-may also invent a fitting minor location).
+The adventure takes place in the {region} region of the Forgotten Realms. Invent a fitting
+minor location within this region.
 Open by plunging into the scene — location, atmosphere, or immediate tension first.
 
 EXCEPTION TO NARRATION STYLE — this opening scene only: within the first couple of
@@ -1053,36 +1073,14 @@ All encountered monsters and locations should be in the Forgotten Realms.
 All monster and location names must be English.
 """
 
-    lore_context, initial_npc_pool = lore.format_lore_context(
-        region, opening_instruction, character_level=1, npc_pool={}
-    )
-
-    # World state: roll thời tiết khởi tạo cho session (turn_number=0)
-    initial_weather, initial_weather_since_turn = world_state.roll_weather(
-        region, current_weather=None, weather_since_turn=0, turn_number=0
-    )
-    world_state_context = world_state.format_world_state_context(0, initial_weather)
-
-    conn = get_conn()
-    c = conn.cursor()
-    if initial_npc_pool:
-        c.execute(
-            "UPDATE character SET npc_pool = ? WHERE id = ?",
-            (json.dumps(initial_npc_pool, ensure_ascii=False), char["id"]),
-        )
-    c.execute(
-        "UPDATE character SET weather = ?, weather_since_turn = ? WHERE id = ?",
-        (initial_weather, initial_weather_since_turn, char["id"]),
-    )
-    conn.commit()
-    conn.close()
+    # RAG lore context + world state (weather/day-night) TẠM THỜI TẮT — xem
+    # ghi chú tương tự trong /chat. region vẫn được chốt/lưu bình thường vì
+    # opening_instruction cần nó để đặt bối cảnh mở đầu.
 
     response = ollama.chat(
         model=MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": lore_context},
-            {"role": "user", "content": world_state_context},
             {"role": "user", "content": opening_instruction},
         ],
         format="json",

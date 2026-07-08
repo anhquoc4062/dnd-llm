@@ -95,6 +95,11 @@ html, body{
 
 .left-panel, .right-panel{ display:flex; flex-direction:column; gap:22px; }
 
+.right-panel {
+  position: sticky;
+  top: 26px;
+}
+
 .section{
   background: var(--panel);
   border: 1px solid var(--line);
@@ -279,6 +284,11 @@ html, body{
 }
 
 /* ---------- Start button ---------- */
+.action-row{
+  display:flex;
+  gap:10px;
+  margin-top: 20px;
+}
 #start-btn{
   font-family: var(--font-display);
   font-size: 17px;
@@ -291,9 +301,25 @@ html, body{
   cursor: pointer;
   box-shadow: 0 6px 18px rgba(181,72,47,0.35);
   transition: transform .12s ease, box-shadow .12s ease;
+  flex: 1;
 }
 #start-btn:hover{ transform: translateY(-2px); box-shadow: 0 10px 24px rgba(181,72,47,0.45); }
 #start-btn:active{ transform: translateY(0); }
+#randomize-btn{
+  font-family: var(--font-display);
+  font-size: 17px;
+  letter-spacing: 0.03em;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--gold-bright);
+  cursor: pointer;
+  transition: all .12s ease;
+  flex: 0 0 auto;
+}
+#randomize-btn:hover{ border-color: var(--gold); transform: translateY(-2px); background: rgba(202,164,86,0.1); }
+#randomize-btn:active{ transform: translateY(0); }
 .form-error{
   color: var(--ember-bright);
   font-size: 14px;
@@ -311,6 +337,7 @@ html, body{
   border-radius: 12px;
   padding: 26px;
   box-shadow: 0 0 0 1px rgba(202,164,86,0.06), 0 20px 40px rgba(0,0,0,0.35);
+  padding-bottom: 10px;
 }
 .character-card{
   text-align:center;
@@ -318,14 +345,27 @@ html, body{
   margin-bottom: 18px;
   border-bottom: 1px solid var(--line);
 }
+.avatar-wrap{
+  position: relative;
+  width: 74px;
+  margin: 0 auto 12px;
+}
 .avatar{
   width: 74px; height:74px;
-  margin: 0 auto 12px;
   display:flex; align-items:center; justify-content:center;
   font-size: 34px;
   background: radial-gradient(circle, rgba(202,164,86,0.18), transparent 70%);
   border: 1px solid var(--gold);
   border-radius: 50%;
+}
+.avatar-class{
+  position: absolute;
+  right: -8px;
+  bottom: -6px;
+  width: 34px; height:34px;
+  font-size: 16px;
+  background: radial-gradient(circle, rgba(202,164,86,0.28), var(--panel-2) 70%);
+  box-shadow: 0 0 0 3px var(--panel);
 }
 #preview-name{
   font-family: var(--font-display);
@@ -407,6 +447,37 @@ html, body{
   color: var(--parchment-dim);
 }
 .preview-section li.empty{ font-style: italic; color: var(--muted); }
+.preview-section li[data-tooltip]{ position: relative; cursor: help; }
+.preview-section li[data-tooltip]::after{
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%) translateY(4px);
+  width: max-content;
+  max-width: 240px;
+  white-space: normal;
+  text-align: left;
+  background: var(--ink);
+  color: var(--parchment);
+  border: 1px solid var(--gold);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  font-style: normal;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity .15s ease, transform .15s ease;
+  z-index: 20;
+  box-shadow: 0 8px 20px rgba(0,0,0,0.4);
+}
+.preview-section li[data-tooltip]:hover::after{
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) translateY(0);
+}
 .preview-section li .li-note{
   display:block;
   font-family: var(--font-mono);
@@ -426,6 +497,41 @@ html, body{
   padding: 10px;
 }
 .hidden{ display:none; }
+
+/* ---------- Campaign seed ---------- */
+.campaign-panel{ 
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  margin-top: 10px;
+ }
+.campaign-panel.hidden{ display:none; }
+.secondary-btn{
+  align-self: flex-start;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--parchment);
+  font-family: var(--font-body);
+  font-size: 14px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.secondary-btn:hover{ border-color: var(--gold); color: var(--gold-bright); }
+.secondary-btn:disabled{ opacity: 0.5; cursor: not-allowed; }
+select.input{ cursor: pointer; }
+select.input:disabled{ opacity: 0.6; cursor: not-allowed; }
+textarea.input{ resize: vertical; font-family: var(--font-body); line-height: 1.5; }
+.campaign-chosen{
+  font-size: 14px;
+  color: var(--parchment-dim);
+  border: 1px solid var(--line);
+  background: rgba(202,164,86,0.06);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.campaign-chosen strong{ color: var(--gold); }
 
 @keyframes shake{
   10%,90%{ transform: translateX(-1px); }

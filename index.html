@@ -16,7 +16,7 @@
 <div class="creator">
 
   <div class="title">
-    <p class="eyebrow">Chương I · Sự Khởi Đầu</p>
+    <p class="eyebrow">Chương Mở Đầu</p>
     <h1>⚔️ Khởi Tạo Định Mệnh</h1>
     <p class="subtitle">Chọn dòng máu, con đường và số phận của bạn — mỗi lựa chọn đều khắc lên số phận nhân vật.</p>
   </div>
@@ -35,7 +35,6 @@
         <div class="pill-group" id="gender-group">
           <button type="button" class="pill" data-gender="Nam">Nam</button>
           <button type="button" class="pill" data-gender="Nữ">Nữ</button>
-          <button type="button" class="pill" data-gender="Khác">Khác</button>
         </div>
       </section>
 
@@ -75,8 +74,36 @@
         <div id="weakness-container" class="trait-list"></div>
       </section>
 
-      <button id="start-btn" onclick="startAdventure()">⚔️ Khởi tạo nhân vật</button>
-      <p id="form-error" class="form-error"></p>
+      <section class="section">
+        <div class="section-head">
+          <span class="section-num">06</span>
+          <h2>Kịch Bản Phiêu Lưu</h2>
+        </div>
+        <p class="hint">Chọn cách DM xây dựng cốt truyện — bạn chỉ thấy 1 câu chủ đề, phần còn lại (mục tiêu, cốt truyện, NPC, quái, trùm) được giữ bí mật để DM theo sát mà không lộ trước.</p>
+
+        <div class="pill-group" id="campaign-mode-group">
+          <button type="button" class="pill selected" data-mode="ai">🎲 AI gợi ý</button>
+          <button type="button" class="pill" data-mode="custom">✍️ Tự viết</button>
+        </div>
+
+        <div id="campaign-ai-panel" class="campaign-panel">
+          <button type="button" id="campaign-generate-btn" class="secondary-btn">🎲 Tạo 5 kịch bản</button>
+          <select id="campaign-select" class="input" disabled>
+            <option value="">— Chưa có kịch bản, bấm "Tạo 5 kịch bản" —</option>
+          </select>
+        </div>
+
+        <div id="campaign-custom-panel" class="campaign-panel hidden">
+          <textarea id="campaign-custom-text" class="input" rows="3" maxlength="400"
+            placeholder="Viết ý tưởng kịch bản của riêng bạn (vd: một cuộc trả thù cho gia tộc bị phản bội)…"></textarea>
+          <button type="button" id="campaign-expand-btn" class="secondary-btn">✅ Xác nhận kịch bản</button>
+        </div>
+
+        <p id="campaign-status" class="hint"></p>
+        <div id="campaign-chosen" class="campaign-chosen hidden">
+          <strong>Kịch bản đã chọn:</strong> <span id="campaign-chosen-theme"></span>
+        </div>
+      </section>
 
     </div>
 
@@ -85,7 +112,10 @@
       <div class="sheet">
 
         <div class="character-card">
-          <div class="avatar" id="avatar">🛡️</div>
+          <div class="avatar-wrap">
+            <div class="avatar avatar-race" id="avatar-race">🧑</div>
+            <div class="avatar avatar-class" id="avatar-class">🛡️</div>
+          </div>
           <h2 id="preview-name">Chưa đặt tên</h2>
           <div id="preview-class">Chưa có chủng tộc · chức nghiệp</div>
         </div>
@@ -132,6 +162,11 @@
 
         <div id="save-badge" class="save-badge hidden">✅ Nhân vật đã được lưu vào bộ nhớ trình duyệt</div>
 
+        <div class="action-row">
+          <button id="start-btn" onclick="startAdventure()">⚔️ Khởi tạo nhân vật</button>
+          <button id="randomize-btn" type="button" onclick="randomizeCharacter()" title="Random giới tính/chủng tộc/chức nghiệp/điểm mạnh/điểm yếu — không đụng tới kịch bản phiêu lưu">🎲</button>
+        </div>
+        <p id="form-error" class="form-error"></p>
       </div>
     </div>
 
