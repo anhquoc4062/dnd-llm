@@ -123,8 +123,8 @@ function addLoading(){
 }
 
 /**
- * Render 4 lựa chọn kèm badge ADV/DIS và lý do (điểm mạnh/điểm yếu liên quan).
- * choices: [{ text, roll: 'normal'|'advantage'|'disadvantage', reason: {type, name} | null }]
+ * Render 4 lựa chọn kèm badge ADV/DIS, DC (nếu cần roll) và lý do (điểm mạnh/điểm yếu liên quan).
+ * choices: [{ text, needs_roll: bool, roll: 'normal'|'advantage'|'disadvantage', dc: number|null, reason: {type, name} | null }]
  */
 function renderChoices(choices) {
     const container = byId('choices-container');
@@ -153,6 +153,10 @@ function renderChoices(choices) {
                 ? ''
                 : `<span class="choice-roll ${rollClass[choice.roll]}">${rollLabel[choice.roll]}</span>`;
 
+        const rollInfo = choice.needs_roll
+            ? `<span class="choice-dc">🎲 Cần roll${choice.dc != null ? ` · DC ${choice.dc}` : ''}</span>`
+            : `<span class="choice-dc choice-dc-auto">✔️ Không cần roll</span>`;
+
         const reason =
             choice.reason
                 ? `<div class="choice-reason reason-${choice.reason.type}">
@@ -160,11 +164,12 @@ function renderChoices(choices) {
                    </div>`
                 : '';
 
-        const header = badge ? `
+        const header = `
             <div class="choice-header">
                 ${badge}
+                ${rollInfo}
             </div>
-        ` : '';
+        `;
 
         return `
             <button class="choice-btn ${rollClass[choice.roll]}"

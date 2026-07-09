@@ -238,6 +238,17 @@ html, body{
   border-color: rgba(181,72,47,0.35);
 }
 
+.choice-dc{
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  margin-left: auto;
+}
+.choice-dc-auto{
+  color: var(--sage-bright);
+}
+
 .choice-text{
   font-size: 15px;
   line-height: 1.5;

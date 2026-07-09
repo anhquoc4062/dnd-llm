@@ -557,6 +557,17 @@ def expand_custom_seed(user_text: str, model: str = None, options: dict = None) 
 # Context cho DM (system prompt) — bị giấu khỏi UI, chỉ DM đọc
 # ---------------------------------------------------------------------------
 
+def monster_roster_names(campaign: dict) -> list:
+    """Danh sách tên quái trong roster campaign — dùng để nhắc lại ngắn gọn ở
+    turn_note mỗi lượt /chat (xem main.py), vì rule đầy đủ trong CAMPAIGN
+    section nằm quá xa lúc model thực sự quyết định entity mới trong 1 system
+    prompt rất dài, dễ bị lãng quên."""
+    if not campaign:
+        return []
+    campaign = _normalize_campaign(campaign)
+    return [m["name"] for m in campaign["monsters"] if m.get("name")]
+
+
 def format_campaign_context(campaign: dict) -> str:
     if not campaign:
         return ""

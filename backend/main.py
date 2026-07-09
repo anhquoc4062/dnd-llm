@@ -727,18 +727,50 @@ those; anything you write there is discarded and wastes your output budget.
     ]
   }},
   "choices": [
-    {{"text": "...", "needs_roll": true, "roll": "advantage", "reason": {{"type": "attribute", "name": "WIS"}}}}
-    {{"text": "...", "needs_roll": true, "roll": "advantage", "reason": {{"type": "race", "name": "Elf"}}}}
-    {{"text": "...", "needs_roll": true, "roll": "disadvantage", "reason": {{"type": "class", "name": "Fighter"}}}}
-    {{"text": "...", "needs_roll": false, "roll": "normal", "reason": null}}
+    {{"text": "...", "needs_roll": true, "roll": "advantage", "dc": 12, "reason": {{"type": "attribute", "name": "WIS"}}}}
+    {{"text": "...", "needs_roll": true, "roll": "advantage", "dc": 10, "reason": {{"type": "race", "name": "Elf"}}}}
+    {{"text": "...", "needs_roll": true, "roll": "disadvantage", "dc": 16, "reason": {{"type": "class", "name": "Fighter"}}}}
+    {{"text": "...", "needs_roll": false, "roll": "normal", "dc": null, "reason": null}}
   ]
 }}
 roll must be advantage/disadvantage/normal. If normal, reason is null. If advantage/disadvantage, reason.type is one of attribute/strength/weakness/skill/item/race/class, citing exactly one real value from the sheet.
 needs_roll: true if the choice has any real chance of failure worth rolling for; false for a
 pure flavor/no-risk choice (e.g. "quan sát xung quanh", "im lặng lắng nghe") that always succeeds.
-IMPORTANT: these needs_roll/roll/reason values are NOT just flavor — if the player picks this
-exact choice next turn, the backend reuses them AS-IS to resolve the roll (no re-classification),
-so they must already reflect your true, final judgement for that action.
+
+dc: REQUIRED whenever needs_roll is true (null when needs_roll is false). YOU set this DC now,
+while you can still see the full scene you just wrote — you are far better positioned to judge
+real difficulty here than a later isolated check would be. Calibrate against how hard THIS
+specific action is in THIS specific moment — use the FULL 8-20 range, not just the middle.
+Anchor each choice against a concrete example at that tier, do not just pick a "safe" number:
+- 8-9 trivial: no real opposition, character has every advantage (e.g. shoving an already-
+  unconscious foe, picking up an unguarded object, walking through an open unlocked door).
+- 10-12 easy: minor real risk, favorable conditions (e.g. sneaking past a distracted/drunk
+  guard, climbing a rough but stable wall, calming a merely annoyed NPC).
+- 13-15 moderate: genuine coin-flip-ish risk, opposition is competent/alert (e.g. picking a
+  well-made lock while someone could return any moment, striking a wary armed bandit,
+  persuading a suspicious guard captain).
+- 16-18 hard: opposition is skilled, prepared, or actively hostile and dangerous (e.g. landing
+  a hit on a trained duelist expecting the attack, resisting a powerful curse mid-cast, leaping
+  a collapsing bridge under enemy fire).
+- 19-20 near-impossible: only a miracle/desperate gambit succeeds (e.g. talking down a
+  bloodthirsty ancient dragon mid-rampage, outrunning a magical death curse with no prep,
+  overpowering a boss-tier foe barehanded).
+- A combat strike against an alert, competent hostile defaults to 14-16, not lower.
+- If roll is "disadvantage", dc must be at least 14 (the odds are already stacked against
+  the character — don't also make the target trivial).
+- A choice that leans on a strength/skill/favorable attribute (roll="advantage") can sit
+  lower (8-12) since the character has a real edge.
+- MANDATORY SPREAD: across the 4 choices this turn, dc values must NOT all cluster in the same
+  narrow band (e.g. never all four sitting at 11-14) — the safest/most cautious choice should
+  usually land low (8-11) and the boldest/most reckless or highest-stakes choice should usually
+  land high (16-20), with the rest in between, reflecting that the choices genuinely differ in
+  risk. If every choice this turn is truly comparable in danger, it's fine for 2 to be close,
+  but never let all 4 collapse into the same number or the same narrow band out of habit.
+
+IMPORTANT: these needs_roll/roll/dc/reason values are NOT just flavor — if the player picks
+this exact choice next turn, the backend reuses them AS-IS to resolve the roll (no
+re-classification of dc/roll), so they must already reflect your true, final judgement for
+that action.
 
 
 """
@@ -781,6 +813,26 @@ async def chat(data: dict):
                     "not present on the character sheet. Verify against Equipment/Items/Skills "
                     "before resolving. If not owned, success MUST be false and the character "
                     "must suffer a penalty for hesitating (e.g. HP loss from being struck).")
+
+    # Nhắc lại roster quái của campaign NGAY SÁT cuối context (gần chỗ model
+    # sắp sinh ra entity mới nhất) — rule đầy đủ đã có trong system prompt
+    # (## CAMPAIGN) nhưng nằm quá xa so với lúc model thực sự quyết định
+    # entity mới, dễ bị lãng quên giữa 1 system prompt rất dài. Lặp lại ngắn
+    # gọn ở đây (recency) để model khó bỏ qua hơn.
+    campaign_data_raw = char["campaign_data"] if "campaign_data" in char.keys() else None
+    if campaign_data_raw:
+        try:
+            roster_names = ", ".join(campaign.monster_roster_names(json.loads(campaign_data_raw)))
+        except (TypeError, json.JSONDecodeError):
+            roster_names = ""
+        if roster_names:
+            turn_note += (
+                f" REMINDER: if a NEW hostile monster must appear THIS turn, it MUST be one of "
+                f"the campaign's MONSTER ROSTER: {roster_names} — reuse its exact "
+                f"name/species/appearance/moveset/behavior from the CAMPAIGN section above. Do "
+                f"NOT invent a generic/unrelated monster name (e.g. \"Shadow Entity\", \"Shrouded "
+                f"Figure\") when one of these already fits the scene."
+            )
 
     # --- Call 1: classify (module classification.py) ---
     prev_result_raw = char["last_result"] if "last_result" in char.keys() else None

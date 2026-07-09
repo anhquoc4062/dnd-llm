@@ -117,7 +117,10 @@ Determine advantage_state using this EXACT procedure, in order:
    -> advantage/disadvantage citing the attribute.
 4. Otherwise -> normal. Do not force advantage/disadvantage without a real match above.
 
-DC CALIBRATION (pick realistically, never default to 12):
+DC CALIBRATION (pick realistically, never default to 12) — this only matters when the
+player's action does NOT match one of the DM's previously suggested choices (those already
+carry their own DC, set by the DM with full scene context, and the backend reuses that instead
+of your guess here):
 - 8-9 trivial | 10-12 easy | 13-15 moderate (real failure risk) | 16-18 hard
   (dangerous, against alert/skilled opposition) | 19-20 near-impossible
 RULE: if advantage_state = "disadvantage", DC must be at least 14.
@@ -422,9 +425,23 @@ def classify_action(model: str, options: dict, user_input: str, char_dict: dict,
             adv_state = "normal"
             adv_reason = None
 
-    dc = _safe_int(classification.get("dc", 12), 12)
+    # DC: nếu action khớp 1 trong 4 choice mà chính DM đã đưa ra ở lượt trước,
+    # DM đã tự tính sẵn DC cho choice đó NGAY LÚC còn thấy toàn bộ ngữ cảnh
+    # scene vừa viết ra -> đáng tin hơn hẳn DC mà classify tự đoán ở đây chỉ
+    # từ 1 câu hành động rời rạc, không có ngữ cảnh. Chỉ rơi về DC tự tính khi
+    # người chơi gõ tự do, không khớp với choice nào DM từng gợi ý.
+    known_dc = None
+    if matched_choice is not None and matched_choice.get("needs_roll"):
+        known_dc = _safe_int(matched_choice.get("dc"), None)
+
+    if reused is not None and known_dc is not None:
+        dc = known_dc
+        print(f"[DEBUG] classify_action: dùng lại dc={dc} do DM tự tính sẵn cho choice này thay vì tính lại")
+    else:
+        dc = _safe_int(classification.get("dc", 12), 12)
+
     if adv_state == "disadvantage" and dc < 14:
-        dc = 14  # ép cứng rule DC tối thiểu, phòng model quên áp dụng
+        dc = 14  # ép cứng rule DC tối thiểu, phòng model quên áp dụng (bất kể dc đến từ đâu)
 
     classification["advantage_state"] = adv_state
     classification["advantage_reason"] = adv_reason
