@@ -83,11 +83,11 @@ function renderCharacter(char){
   ['str','dex','con','int','wis','cha'].forEach(k => {
     const el = byId('stat-' + k);
     if (!el) return;
-    const val = attrs[k] ?? 8;
+    const val = attrs[k] ?? 10;
     el.textContent = val;
     el.classList.remove('pos', 'neg', 'neutral');
-    if (val > 8) el.classList.add('pos');
-    else if (val < 8) el.classList.add('neg');
+    if (val > 10) el.classList.add('pos');
+    else if (val < 10) el.classList.add('neg');
     else el.classList.add('neutral');
   });
 
@@ -368,13 +368,13 @@ function renderDmTurn(data) {
     html += `<div class="turn-log">${logParts.join('')}</div>`;
   }
 
+  // 3. Story
+  html += `<div class="turn-story">${escapeHtml(data.story)}</div>`;
+
   // 2. Reasoning
   if (mechanics.reasoning) {
     html += `<div class="turn-reasoning">⚠️ ${escapeHtml(mechanics.reasoning)}</div>`;
   }
-
-  // 3. Story
-  html += `<div class="turn-story">${escapeHtml(data.story)}</div>`;
 
   div.innerHTML = html;
   container.appendChild(div);

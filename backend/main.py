@@ -103,10 +103,11 @@ def init_db():
     # Cho phép nâng cấp DB cũ (được tạo trước khi có race_en/character_class_en)
     # mà không cần xoá file game.db thủ công.
     existing_cols = {row["name"] for row in c.execute("PRAGMA table_info(character)")}
-    int_cols_default_0 = ("turns_since_event", "weather_since_turn", "current_turn", "summarized_up_to_turn")
+    int_cols_default_0 = ("turns_since_event", "weather_since_turn", "current_turn", "summarized_up_to_turn", "campaign_milestone_index")
     for col in ("race_en", "character_class_en", "turns_since_event", "region", "npc_pool",
                 "last_result", "weather", "weather_since_turn", "current_turn",
-                "history_summary", "summarized_up_to_turn", "campaign_theme", "campaign_data"):
+                "history_summary", "summarized_up_to_turn", "campaign_theme", "campaign_data",
+                "campaign_milestone_index"):
         if col not in existing_cols:
             if col in int_cols_default_0:
                 c.execute(f"ALTER TABLE character ADD COLUMN {col} INTEGER DEFAULT 0")
@@ -206,6 +207,23 @@ def _load_json_dict(text):
         return result if isinstance(result, dict) else {}
     except (TypeError, json.JSONDecodeError):
         return {}
+
+
+def _load_campaign_bible(char) -> dict | None:
+    """Campaign Bible giờ ưu tiên đọc từ file JSON riêng (xem campaign.py:
+    save/load_campaign_bible) — dễ mở lên xem/theo dõi hơn hẳn so với 1 cột
+    TEXT lớn trong SQLite. Fallback về cột campaign_data cũ trong DB chỉ để
+    đọc ngược các save được tạo TRƯỚC khi có cơ chế file này."""
+    bible = campaign.load_campaign_bible()
+    if bible:
+        return bible
+    campaign_data_raw = char["campaign_data"] if "campaign_data" in char.keys() else None
+    if campaign_data_raw:
+        try:
+            return json.loads(campaign_data_raw)
+        except (TypeError, json.JSONDecodeError):
+            return None
+    return None
 
 
 def _item_matches(item, name):
@@ -339,10 +357,14 @@ async def create_character(data: dict):
 
     campaign_seed = data.get("campaignSeed")
     campaign_theme = None
-    campaign_data_json = None
     if isinstance(campaign_seed, dict):
         campaign_theme = campaign_seed.get("theme")
-        campaign_data_json = json.dumps(campaign_seed, ensure_ascii=False)
+        # Campaign Bible được lưu ra file JSON riêng (backend/campaign_saves/
+        # current_campaign.json) thay vì nhét nguyên khối vào cột DB — dễ mở
+        # lên xem/theo dõi lúc dev/debug hơn hẳn so với đọc 1 cột TEXT lớn
+        # trong SQLite. Cột campaign_data trong DB chỉ còn giữ để đọc ngược
+        # các save cũ tạo trước khi có cơ chế file này (xem chỗ load context).
+        campaign.save_campaign_bible(campaign_seed)
 
     conn = get_conn()
     c = conn.cursor()
@@ -370,12 +392,12 @@ async def create_character(data: dict):
         data.get("raceEn") or race,
         character_class,
         data.get("classEn") or character_class,
-        safe_int(attrs.get("str", 8), 8),
-        safe_int(attrs.get("dex", 8), 8),
-        safe_int(attrs.get("con", 8), 8),
-        safe_int(attrs.get("int", 8), 8),
-        safe_int(attrs.get("wis", 8), 8),
-        safe_int(attrs.get("cha", 8), 8),
+        safe_int(attrs.get("str", 10), 10),
+        safe_int(attrs.get("dex", 10), 10),
+        safe_int(attrs.get("con", 10), 10),
+        safe_int(attrs.get("int", 10), 10),
+        safe_int(attrs.get("wis", 10), 10),
+        safe_int(attrs.get("cha", 10), 10),
         hp, hp,        # hp = max_hp lúc mới tạo
         mana, mana,    # mana = max_mana lúc mới tạo
         1,             # level
@@ -388,7 +410,7 @@ async def create_character(data: dict):
         _list_json(data.get("skills")),
         _list_json(data.get("items")),
         campaign_theme,
-        campaign_data_json,
+        None,  # campaign_data: không còn ghi blob lớn vào DB, xem campaign_saves/current_campaign.json
     ))
 
     conn.commit()
@@ -507,13 +529,17 @@ def build_system_prompt(char: sqlite3.Row) -> str:
                 parts.append(label)
         return "; ".join(p for p in parts if p) or "None"
 
-    campaign_data_raw = char["campaign_data"] if "campaign_data" in char.keys() else None
-    campaign_block = ""
-    if campaign_data_raw:
-        try:
-            campaign_block = campaign.format_campaign_context(json.loads(campaign_data_raw))
-        except (TypeError, json.JSONDecodeError):
-            campaign_block = ""
+    # turn_number > 0 -> đã qua khỏi scene mở đầu, KHÔNG cần nhắc lại
+    # "TURN 1 MUST OPEN AT ..." mỗi lượt nữa (chỉ tốn token context vô ích,
+    # xem format_campaign_context) -> tiết kiệm vài trăm token/lượt.
+    # milestone_index -> chỉ mớm milestone HIỆN TẠI (không phải cả danh
+    # sách) + chỉ mở khoá secret/boss-stage theo đúng tiến độ đã tới, vừa cắt
+    # mạnh context mỗi lượt vừa chặn model tự spoil milestone/twist chưa tới.
+    campaign_block = campaign.format_campaign_context(
+        _load_campaign_bible(char),
+        turn_number=char["current_turn"] or 0,
+        milestone_index=char["campaign_milestone_index"] if "campaign_milestone_index" in char.keys() else 0,
+    )
 
     return f"""/no_think
 
@@ -535,196 +561,112 @@ Items: {fmt_list(c['items'])}
 {social.format_social_context(c['race_en'], c['character_class_en'])}
 
 ## ACTION VALIDATION (do this FIRST, every turn)
-1. Does the action use a weapon/item/skill? Check it exists in Equipment/Skills/Items above.
-   - If NOT owned: success=false. The character hesitates/fumbles reaching for something they don't have, and suffers a concrete penalty (HP loss from an enemy strike, or item damage, or being spotted) — never a "soft" consequence.
-   - If a SKILL is marked "[ON COOLDOWN]" above: success=false. The character tries to use it but it isn't ready yet (still recovering / out of charge) — narrate this explicitly and apply a concrete penalty, same as an unowned skill.
-   - Example: player says "I cast Fireball" but Fireball is not in Skills → success:false, mechanics.changes.hp: -8, story explains the character wastes a beat gesturing uselessly and takes a hit.
-2. Is the action physically/logically possible given attributes and story context? If not, same rule applies.
-3. Otherwise resolve normally: pick advantage/disadvantage/normal based on ONE attribute, strength, or weakness (never invent other justification).
+1. Action uses a weapon/item/skill not in Equipment/Skills/Items above, OR a skill marked
+   "[ON COOLDOWN]"? -> success=false, concrete penalty (HP loss/spotted/etc, never "soft"). E.g.
+   "cast Fireball" with no Fireball skill -> success:false, changes.hp:-8, character fumbles.
+2. Physically/logically impossible given attributes/context? -> same rule.
+3. Otherwise resolve normally: advantage/disadvantage/normal from ONE attribute/strength/
+   weakness (never invent other justification).
 
-## ITEMS & SKILLS — DO NOT MANAGE INVENTORY YOURSELF
-- You must NEVER decide on your own that the character finds, loses, or uses an item or
-  skill outside of what the backend explicitly tells you via INTERNAL MECHANICS each turn.
-- Only put a name in mechanics.changes.items_added if the backend's turn note explicitly
-  allows a loot drop this turn (it will say so). Otherwise items_added MUST be [].
-- Only put a name in mechanics.changes.items_removed if the backend's turn note explicitly
-  names an item that was just consumed. Otherwise items_removed MUST be [].
-- Narrate item use/finding richly in the story text, but the actual bookkeeping (removing
-  used items, applying cooldowns) is handled by the backend — do not duplicate it.
+## ITEMS & SKILLS — backend-managed, do not duplicate
+Never decide yourself that the character finds/loses/uses an item or skill outside what
+INTERNAL MECHANICS tells you each turn. items_added/items_removed: only set when the turn
+note explicitly says so this turn; otherwise []. Narrate richly, but bookkeeping is the
+backend's job.
 
-## CONSEQUENCES (must show up in mechanics.changes)
-- Killing a monster: do NOT invent xp/gold for it yourself — the backend automatically awards
-  both the instant an entity's status becomes "dead", based on its tier. Just set
-  mechanics.entities status to "dead"; leave changes.xp/changes.gold at 0 for the kill itself.
-- Non-combat rewards only (quest turn-in, NPC payment, treasure found, story progress): still
-  your call — set changes.xp/changes.gold/items yourself for these.
-- Failure: HP loss (combat), mana loss (magic), or a concrete story setback (alerted enemies, lost item, dropped guard) — always something mechanical, never just narrative.
+## CONSEQUENCES
+Killing a monster: do NOT invent xp/gold — backend auto-awards on status="dead"; leave
+changes.xp/gold at 0 for the kill. Non-combat rewards (quest turn-in, payment, treasure,
+progress): your call, set changes yourself. Failure: HP loss / mana loss / concrete story
+setback — always mechanical, never just narrative.
 
 ## DEATH RULE
-If this turn's damage would reduce the character's HP to 0 or below, set
-mechanics.character_died = true. When character_died is true, choices MUST be an
-empty array [] — the story ends here, no further action is possible. Never set
-character_died = true unless HP truly reaches 0 this turn.
+Damage reduces HP to <=0 this turn -> mechanics.character_died=true, choices=[] (story ends).
+Never set true unless HP truly hits 0 this turn.
 
-## DEATH SCENE (when mechanics.character_died = true)
-This is the FINAL story the character will ever hear — make it unmistakable and brutal.
-Requirements:
-- 150-220 words, no choices follow, no ambiguity — the character is unquestionably dead.
-- The tormentor's voice cuts through the final moment — mocking, triumphant, merciless
-  (use {c['name']}, never "bạn", per NARRATION STYLE; scorn is woven into the scene itself).
-- Describe the death itself in full, unflinching physical detail — the wound, the
-  failing body, the last sensation before darkness. No fade-to-black, no "everything
-  goes dark" cop-out — commit to the visceral moment.
-- End with a final, cold, damning line from the tormentor — a verdict on their failure,
-  not comfort.
-- Do NOT mention dice, DC, or numeric mechanics even here.
+## DEATH SCENE (when character_died=true)
+150-220 words, no choices, unambiguous death. Tormentor's voice cuts through — mocking,
+triumphant, merciless (use {c['name']}, never "bạn"). Full unflinching physical detail of the
+death itself — no fade-to-black. End on a cold, damning line from the tormentor, not comfort.
+No dice/DC/numeric mechanics even here.
 
 ## CHOICES
-Always exactly 4. No lettering/numbering prefixes.
-
-Each choice must be a SPECIFIC action tied to concrete details of THIS scene (the
-creature/NPC/object/environment just described) — never a generic verb alone.
-- BAD (too generic): "Attack", "Investigate the area", "Try to negotiate", "Run away"
-- GOOD (specific to scene): "Lao vào ném dao nhằm mắt con quái trước khi nó vồ tới",
-  "Giả vờ đồng ý giao vàng để dụ tên cướp lại gần trong tầm kiếm", "Hỏi lão già vì sao
-  tay ông ta run khi nhắc tới cánh cửa", "Nhảy qua khe nứt để thoát khỏi luồng khí độc"
-
-Vary the UNDERLYING approach across the 4 choices (combat/stealth/diplomacy/
-investigation/escape/trickery/sacrifice-a-resource), but do NOT force all 5 categories
-every turn — pick whichever 4 make sense for the current threat/NPC/object. A pure
-combat scene may reasonably have 2 combat-flavored choices (e.g. aggressive vs
-defensive) plus 1 escape + 1 clever/desperate option, as long as they read as
-genuinely different plans, not reworded synonyms of each other.
-
-Avoid repeating the wording, sentence structure, or core tactical idea
-from recent turns and from the immediately previous turn.
-
-When a similar action is necessary, introduce a meaningful tactical difference
-or a different objective.
-
-If the previous action failed, at least one choice must directly address the new
-consequence (retreat, defend, counter-attack, improvise, use a specific item/skill
-from the sheet).
-
-At least one of the 4 choices each turn should involve risk/cost beyond combat damage
-(e.g. spending an item, provoking a worse outcome, moral compromise, revealing
-information) to avoid choices feeling mechanically identical turn after turn.
-
-At least ONE of the 4 choices each turn should leverage something SPECIFIC to this
-character's identity — their race, class, a strength, or a weakness from the sheet —
-rather than a generic option anyone could take. Do not force this if the scene truly
-gives no plausible opening (e.g. mid-fall, no agency), but actively look for one.
-- Race-flavored example: a Dwarf "xem xét kết cấu đá để tìm điểm yếu" (dwarven stonework
-  instinct); an Elf "để dòng máu tiên tộc trấn an trước ảo ảnh" (fey resilience).
-- Class-flavored example: a Rogue "lặng lẽ cạy khóa thay vì phá cửa"; a Cleric "cầu
-  nguyện để giữ vững tinh thần trước nỗi sợ".
-- Strength/weakness-flavored: reference the exact sheet entry concretely (already
-  required elsewhere in this prompt) — don't invent a trait not on the sheet.
-Keep it thematically plausible for the race/class, not mechanically precise 5e rules.
+Exactly 4, no lettering/numbering. Each SPECIFIC to this scene's concrete details — never a
+bare verb ("Attack"/"Investigate"/"Run"). E.g. "Lao vào ném dao nhằm mắt con quái trước khi nó
+vồ tới", not "Tấn công". Vary the underlying approach (combat/stealth/diplomacy/investigation/
+escape/trickery/sacrifice-a-resource) — pick whichever 4 fit the scene, don't force every
+category every turn. Avoid repeating wording/tactics from recent turns. If the previous action
+failed, >=1 choice must directly address that consequence. >=1 choice should carry risk/cost
+beyond combat damage (item spent, worse outcome, moral compromise, info revealed). >=1 choice
+should leverage something SPECIFIC to this character (race/class/strength/weakness from the
+sheet, not generic) whenever the scene plausibly allows it — e.g. a Dwarf reading stonework, a
+Rogue picking a lock quietly; reference the exact sheet entry, never invent a trait not on it.
 
 ## SCENE CONTINUITY
-You will receive [CURRENT SCENE STATE] each turn — this is the ONLY source of truth for where
-the character physically is. NEVER move the character backward to a previously resolved
-location/puzzle/obstacle unless they explicitly choose to retreat. Once a door/lock/trap is
-resolved, it stays resolved — do not reintroduce it. Always advance scene_state forward.
-
-Before narrating a new scene, first imagine an interesting situation rather than a quest.
-
-A good situation should usually contain:
-
-- An opportunity or reward.
-- An obstacle or danger.
-- A mystery, uncertainty, or hidden truth.
-- A source of tension that may worsen if ignored.
-
-The player should immediately want to make a meaningful decision.
+[CURRENT SCENE STATE] each turn is the ONLY truth for where the character is — never move
+backward to a resolved location/puzzle/obstacle unless they explicitly retreat; always advance
+scene_state forward. Frame each new scene as a SITUATION (opportunity + danger + mystery +
+rising tension), not a bare quest step — the player should want to act immediately.
 
 ## NARRATION STYLE (story text only)
-- Jump straight into events — sensory detail, action, or world reaction. Do NOT start the story sentence with
-  "[CharacterName] + verb" (e.g. "{c['name']} rút kiếm...").
-- NEVER call the player "bạn" / "you" in story text.
-- When the character must be referenced, use their proper name ({c['name']}) — NOT a generic
-  class/race label like "tên chiến binh"/"người lùn"/"kẻ lẩn trốn". Use it sparingly; prefer
-  describing what happens (blade swings, foot slips, door groans) over labeling who acts, but
-  when you do need to name who acts, it's always {c['name']}.
-- BAD openings: "Bạn cảm thấy lạnh...", "Tên chiến binh rút kiếm..." (never lead with name/label + verb).
-- GOOD openings: "Khói mùi lưu huỳnh bốc lên từ khe đá.", "Mũi kiếm vạt ngang bụng con quái.",
-  "Tiếng gõ cửa vang lên — ba nhịp, rồi im bặt."
+Jump straight into action/sensory detail/world reaction — never open with "{c['name']} + verb"
+or call the player "bạn". When naming who acts, always {c['name']} (never a generic class/race
+label) — prefer describing what happens over stating who acts. BAD: "Bạn cảm thấy lạnh...",
+"Tên chiến binh rút kiếm...". GOOD: "Khói mùi lưu huỳnh bốc lên từ khe đá.", "Mũi kiếm vạt
+ngang bụng con quái."
+
+WRITE NATURAL VIETNAMESE, not a literal English-to-Vietnamese translation. A common failure
+mode: chaining 3+ comma-separated descriptive clauses in one sentence like an English appositive
+list — this reads as awkward, translated Vietnamese. BAD (translated-English rhythm): "Đó là
+một sinh vật không mặt, mặc áo choàng rách nát, chuyển động với sự khinh thường." GOOD (natural
+Vietnamese rhythm, split into short punchy sentences): "Nó không có mặt. Áo choàng rách bươm
+phất phơ theo từng bước chân khinh khỉnh." Keep sentences short and concrete; let action verbs
+carry the scene instead of stacking adjective clauses.
 
 ## ENTITIES (NPCs/monsters) — PERSISTENCE RULES
-- mechanics.entities is OPTIONAL and only needed when: (a) a new NPC/monster appears this
-  turn, or (b) an EXISTING one (listed in ACTIVE ENTITIES context) takes damage/heals/dies/flees.
-- NEW entity: include key (short snake_case, unique), name (English), type ("npc"|"monster"),
-  max_hp, hp (usually = max_hp), ac (8-20; weak/unarmored=8-11, average=12-14, armored/tough=15-18,
-  heavily armored/legendary=19-20), attack_bonus (0-10; weak=0-2, average=3-5, strong=6-8,
-  boss/legendary=9-10), damage_dice (5e dice notation matching its weapon/attack, e.g. "1d6",
-  "2d8+2"), hostile (true/false). ac/attack_bonus/damage_dice are set ONCE at creation and used by
-  the backend to resolve every attack roll to/from this entity in later turns (both the player
-  attacking it, and it attacking the player) — pick them to match how the story describes the
-  creature (a lightly-clad goblin should not have AC 18 or attack_bonus 9). You never need to
-  compute the outcome yourself afterward: the backend rolls the dice and tells you who got hit
-  and for how much — you only narrate it.
-- NEW hostile monster source: if the CAMPAIGN section above includes a MONSTER ROSTER, a new
-  hostile monster MUST come from that roster (reuse its exact name/appearance/moveset/
-  behavior) — do not default to a generic/unrelated creature out of habit when the roster
-  already has something that fits.
-- CONSISTENCY (critical): the creature/NPC you write into mechanics.entities MUST be the
-  EXACT same creature you just described in the story text this turn — same species/kind,
-  same weapon/method of attack. If the story says a snake bit/coiled around the character,
-  name MUST be a snake (e.g. "Venomous Serpent"), never an unrelated creature like a spider.
-  Never invent a name/species that contradicts what the story prose just narrated.
-- EXISTING entity (its key already appears in ACTIVE ENTITIES): include ONLY key and
-  hp_change (negative=damage dealt to it, positive=healing). Do NOT re-send max_hp/type/name
-  for existing entities. Add "status": "dead"/"fled" when applicable. The story text must
-  keep describing it as the SAME creature it was introduced as — never switch species mid-scene.
-- Never invent stats for an entity already listed in ACTIVE ENTITIES — use its key as given.
-- Do not use Vietnamese for monster name.
+mechanics.entities is OPTIONAL — only when (a) a new NPC/monster appears, or (b) an EXISTING
+one (in ACTIVE ENTITIES) takes damage/heals/dies/flees.
+NEW: key (snake_case unique), name (English), type ("npc"|"monster"), max_hp, hp(=max_hp),
+ac (8-20: weak=8-11, average=12-14, armored=15-18, legendary=19-20), attack_bonus (0-10:
+weak=0-2, average=3-5, strong=6-8, boss=9-10), damage_dice (5e notation, e.g. "1d6"/"2d8+2"),
+hostile (bool). These are set ONCE and drive all later attack rolls to/from it — match how the
+story describes it (a lightly-clad goblin ≠ AC 18). You never compute hit/damage yourself —
+backend rolls it, you only narrate the result.
+NEW hostile monster MUST come from the CAMPAIGN's MONSTER ROSTER if one fits (exact name/
+appearance/moveset/behavior) — don't default to a generic creature out of habit.
+CONSISTENCY: the entity you write MUST match what the story text this turn just described —
+same species, same attack method (a snake bite ≠ "spider" in entities). Never contradict prose.
+EXISTING (key already in ACTIVE ENTITIES): send ONLY key + hp_change (negative=damage,
+positive=heal) + "status":"dead"/"fled" if applicable — never resend max_hp/type/name, never
+switch its species mid-scene, never invent stats for it.
+Monster names must be English, never Vietnamese.
 
 ## LOOT — PERSISTENCE RULES
-- mechanics.loot_dropped: only populate when the story text this turn explicitly shows an
-  item becoming available in the world (monster killed and drops something, a chest is
-  opened, an item is found). name = English item name, source_key = the entity key it
-  dropped from (or null if not from a creature).
-- items_added in changes must only reference items that were dropped THIS turn via
-  loot_dropped, OR that already appear in the LOOT AVAILABLE list from context, OR are a
-  direct narrative reward (quest gold/item) clearly justified by the story — never invent
-  combat loot without declaring it via loot_dropped first.
+loot_dropped: only when the story this turn explicitly shows an item becoming available (kill
+drop, chest opened, found item) — name (English), source_key (entity key or null).
+items_added must only reference items dropped THIS turn via loot_dropped, already in LOOT
+AVAILABLE, or a direct narrative reward clearly justified by the story — never invent combat
+loot without declaring it via loot_dropped first.
 
 ## LANGUAGE
-Output must be 100% Vietnamese. Never switch to another language for any reason, including
-internal reasoning, even if you notice unclear or conflicting instructions — just make
-the most reasonable interpretation silently and continue in Vietnamese.
-Only keep monsters and locations name in English.
-
+100% Vietnamese output, no exceptions, even in unclear/conflicting cases — just decide silently
+and continue in Vietnamese. Monster and location names stay English.
 
 ## OUTPUT FORMAT (Vietnamese only for story/choices, JSON keys in English)
-Do NOT output "success" or "roll_type" — the backend already rolled the dice and decides
-those; anything you write there is discarded and wastes your output budget.
+Do NOT output "success"/"roll_type" — backend already decided those; writing them wastes budget.
 {{
   "story": "...",
   "mechanics": {{
     "reasoning": "",
     "event_occurred": false,
     "character_died": false,
+    "milestone_complete": false,
     "changes": {{"hp": 0, "mana": 0, "gold": 0, "xp": 0, "items_added": [], "items_removed": []}},
     "entities": [
-      {{
-        "key": "<unique_entity_key>",
-        "name": "<entity_name>",
-        "type": "monster|npc|companion|object",
-        "max_hp": 0,
-        "hp": 0,
-        "ac": 12,
-        "hostile": false,
-        "status": "alive|dead"
-      }}
+      {{"key": "<unique_entity_key>", "name": "<entity_name>", "type": "monster|npc|companion|object",
+        "max_hp": 0, "hp": 0, "ac": 12, "hostile": false, "status": "alive|dead"}}
     ],
-    "loot_dropped": [
-        {{
-        "name": "<item_name>",
-        "source_key": "<entity_key>"
-      }}
-    ]
+    "loot_dropped": [{{"name": "<item_name>", "source_key": "<entity_key>"}}]
   }},
   "choices": [
     {{"text": "...", "needs_roll": true, "roll": "advantage", "dc": 12, "reason": {{"type": "attribute", "name": "WIS"}}}}
@@ -733,46 +675,35 @@ those; anything you write there is discarded and wastes your output budget.
     {{"text": "...", "needs_roll": false, "roll": "normal", "dc": null, "reason": null}}
   ]
 }}
-roll must be advantage/disadvantage/normal. If normal, reason is null. If advantage/disadvantage, reason.type is one of attribute/strength/weakness/skill/item/race/class, citing exactly one real value from the sheet.
-needs_roll: true if the choice has any real chance of failure worth rolling for; false for a
-pure flavor/no-risk choice (e.g. "quan sát xung quanh", "im lặng lắng nghe") that always succeeds.
+reasoning: ONE short sentence explaining WHY this turn's roll succeeded/failed, tied to the
+actual attribute/skill/item that governed it (dice_fact each turn tells you which one) — write
+it like a brief in-world tactical aside, e.g. "Phản xạ nhanh giúp né đòn trong gang tấc." NEVER
+mention system/internal terms here (MONSTER ROSTER, mechanics, JSON, backend, dice, DC, entity,
+roll) — those words must never appear in this field. If this turn had NO real roll (no "dice" in
+INTERNAL MECHANICS this turn — e.g. a pure narrative/no-risk action), leave reasoning as "" —
+do not invent a reason for something that didn't happen.
 
-dc: REQUIRED whenever needs_roll is true (null when needs_roll is false). YOU set this DC now,
-while you can still see the full scene you just wrote — you are far better positioned to judge
-real difficulty here than a later isolated check would be. Calibrate against how hard THIS
-specific action is in THIS specific moment — use the FULL 8-20 range, not just the middle.
-Anchor each choice against a concrete example at that tier, do not just pick a "safe" number:
-- 8-9 trivial: no real opposition, character has every advantage (e.g. shoving an already-
-  unconscious foe, picking up an unguarded object, walking through an open unlocked door).
-- 10-12 easy: minor real risk, favorable conditions (e.g. sneaking past a distracted/drunk
-  guard, climbing a rough but stable wall, calming a merely annoyed NPC).
-- 13-15 moderate: genuine coin-flip-ish risk, opposition is competent/alert (e.g. picking a
-  well-made lock while someone could return any moment, striking a wary armed bandit,
-  persuading a suspicious guard captain).
-- 16-18 hard: opposition is skilled, prepared, or actively hostile and dangerous (e.g. landing
-  a hit on a trained duelist expecting the attack, resisting a powerful curse mid-cast, leaping
-  a collapsing bridge under enemy fire).
-- 19-20 near-impossible: only a miracle/desperate gambit succeeds (e.g. talking down a
-  bloodthirsty ancient dragon mid-rampage, outrunning a magical death curse with no prep,
-  overpowering a boss-tier foe barehanded).
-- A combat strike against an alert, competent hostile defaults to 14-16, not lower.
-- If roll is "disadvantage", dc must be at least 14 (the odds are already stacked against
-  the character — don't also make the target trivial).
-- A choice that leans on a strength/skill/favorable attribute (roll="advantage") can sit
-  lower (8-12) since the character has a real edge.
-- MANDATORY SPREAD: across the 4 choices this turn, dc values must NOT all cluster in the same
-  narrow band (e.g. never all four sitting at 11-14) — the safest/most cautious choice should
-  usually land low (8-11) and the boldest/most reckless or highest-stakes choice should usually
-  land high (16-20), with the rest in between, reflecting that the choices genuinely differ in
-  risk. If every choice this turn is truly comparable in danger, it's fine for 2 to be close,
-  but never let all 4 collapse into the same number or the same narrow band out of habit.
+roll: advantage/disadvantage/normal (if normal, reason=null; else reason.type is one of
+attribute/strength/weakness/skill/item/race/class, citing exactly one real sheet value).
+needs_roll: true if there's any real chance of failure worth rolling; false for pure flavor/
+no-risk (e.g. "quan sát xung quanh") that always succeeds.
 
-IMPORTANT: these needs_roll/roll/dc/reason values are NOT just flavor — if the player picks
-this exact choice next turn, the backend reuses them AS-IS to resolve the roll (no
-re-classification of dc/roll), so they must already reflect your true, final judgement for
-that action.
+dc: REQUIRED when needs_roll=true (null otherwise). Set it now, with full scene context, using
+the FULL 8-20 range — don't cluster in the middle: 8-9 trivial (no real opposition) | 10-12
+easy (minor risk, favorable) | 13-15 moderate (real coin-flip risk, alert opposition) | 16-18
+hard (skilled/prepared/hostile opposition) | 19-20 near-impossible (only a desperate gambit
+succeeds). Combat vs an alert competent hostile defaults 14-16. roll="disadvantage" -> dc>=14.
+roll="advantage" -> can sit lower (8-12), character has a real edge.
+MANDATORY SPREAD across the 4 choices: don't let all 4 land in one narrow band (e.g. never all
+four at 11-14) — safest choice usually low (8-11), boldest/highest-stakes usually high (16-20).
 
+These needs_roll/roll/dc/reason values are FINAL — if the player picks this exact choice next
+turn, the backend reuses them as-is (no re-classification), so they must be your true judgement.
 
+milestone_complete: set true ONLY on the turn where the story you just wrote clearly satisfies
+the CURRENT MILESTONE's description from the CAMPAIGN BIBLE above (per the campaign section's
+CURRENT MILESTONE line) — this unlocks the next milestone and possibly new secrets for future
+turns, so don't set it early/speculatively, and don't forget to set it once it's genuinely true.
 """
 
 
@@ -819,12 +750,9 @@ async def chat(data: dict):
     # (## CAMPAIGN) nhưng nằm quá xa so với lúc model thực sự quyết định
     # entity mới, dễ bị lãng quên giữa 1 system prompt rất dài. Lặp lại ngắn
     # gọn ở đây (recency) để model khó bỏ qua hơn.
-    campaign_data_raw = char["campaign_data"] if "campaign_data" in char.keys() else None
-    if campaign_data_raw:
-        try:
-            roster_names = ", ".join(campaign.monster_roster_names(json.loads(campaign_data_raw)))
-        except (TypeError, json.JSONDecodeError):
-            roster_names = ""
+    campaign_bible = _load_campaign_bible(char)
+    if campaign_bible:
+        roster_names = ", ".join(campaign.monster_roster_names(campaign_bible))
         if roster_names:
             turn_note += (
                 f" REMINDER: if a NEW hostile monster must appear THIS turn, it MUST be one of "
@@ -1224,6 +1152,28 @@ async def chat(data: dict):
     else:
         result["mechanics"]["is_dead"] = False
 
+    # --- Campaign milestone: DM tự báo hoàn thành milestone hiện tại qua
+    # mechanics.milestone_complete -> backend tăng index đã lưu, MỞ KHOÁ
+    # milestone/secret/boss-stage kế tiếp cho các lượt sau (xem
+    # campaign.format_campaign_context). Không tăng nếu nhân vật vừa chết
+    # (câu chuyện đã kết thúc, không còn "lượt sau" nào để mở khoá). Bỏ cờ
+    # này khỏi mechanics trả về frontend — chỉ là tín hiệu nội bộ, không phải
+    # thứ người chơi cần thấy.
+    milestone_complete = bool(result["mechanics"].pop("milestone_complete", False))
+    if milestone_complete and not result["mechanics"].get("character_died"):
+        bible_for_progress = _load_campaign_bible(char)
+        if bible_for_progress:
+            total_milestones = len(campaign._normalize_bible(bible_for_progress)["story_milestones"])
+            current_index = char["campaign_milestone_index"] if "campaign_milestone_index" in char.keys() else 0
+            new_index = min(current_index + 1, total_milestones - 1)
+            if new_index != current_index:
+                conn = get_conn()
+                c = conn.cursor()
+                c.execute("UPDATE character SET campaign_milestone_index = ? WHERE id = ?", (new_index, char["id"]))
+                conn.commit()
+                conn.close()
+                print(f"[DEBUG] milestone_complete=true -> campaign_milestone_index {current_index} -> {new_index}")
+
     conn = get_conn()
     c = conn.cursor()
     c.execute(
@@ -1294,12 +1244,34 @@ async def start_game():
     system_prompt = build_system_prompt(char)
     opening_char = character_row_to_dict(char)
 
+    # Nếu nhân vật có Campaign Bible, cảnh mở đầu PHẢI diễn ra đúng tại
+    # starting_location của bible đó (không phải 1 vùng Forgotten Realms bịa
+    # ngẫu nhiên) — nếu không, đoạn "invent a fitting minor location" bên
+    # dưới sẽ ghi đè/mâu thuẫn với STARTING LOCATION đã định sẵn trong system
+    # prompt (## CAMPAIGN BIBLE), vì user-turn message này nằm GẦN lúc sinh
+    # hơn nên dễ thắng theo hiệu ứng recency.
+    campaign_bible = _load_campaign_bible(char)
+
     # Ép AI trả về JSON ngay cả trong màn mở đầu
+    if campaign_bible and isinstance(campaign_bible.get("starting_location"), dict):
+        start_loc = campaign_bible["starting_location"]
+        location_instruction = (
+            f"This campaign's world is NOT the Forgotten Realms — it is the original setting "
+            f"defined in the CAMPAIGN BIBLE section above. The opening scene MUST take place at "
+            f"the exact STARTING LOCATION already specified there: \"{start_loc.get('name', '')}\". "
+            f"Weave in its opening_hook naturally within the first couple of sentences — do not "
+            f"invent a different location."
+        )
+    else:
+        location_instruction = (
+            f"The adventure takes place in the {region} region of the Forgotten Realms. Invent a "
+            f"fitting minor location within this region."
+        )
+
     opening_instruction = f"""
 Start a brand-new Dungeons & Dragons 5e campaign.
 This is the opening scene only.
-The adventure takes place in the {region} region of the Forgotten Realms. Invent a fitting
-minor location within this region.
+{location_instruction}
 Open by plunging into the scene — location, atmosphere, or immediate tension first.
 
 EXCEPTION TO NARRATION STYLE — this opening scene only: within the first couple of
@@ -1314,7 +1286,7 @@ clearly conveyed, either by stating the word directly or through unmistakable de
 detail a reader would recognize as that race/class. Every later turn goes back to the
 normal NARRATION STYLE (name only, no need to restate race/class).
 
-All encountered monsters and locations should be in the Forgotten Realms.
+{"All encountered monsters and locations should fit this campaign's original world/setting from the CAMPAIGN BIBLE above, not the Forgotten Realms." if campaign_bible else "All encountered monsters and locations should be in the Forgotten Realms."}
 All monster and location names must be English.
 """
 

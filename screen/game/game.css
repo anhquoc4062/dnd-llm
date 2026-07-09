@@ -625,9 +625,9 @@ li.cooldown {
   font-size: 13px;
   font-style: italic;
   color: var(--muted);
-  margin-bottom: 10px;
-  padding-bottom: 10px;
-  border-bottom: 1px dashed var(--line);
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
 }
 
 .turn-story{
