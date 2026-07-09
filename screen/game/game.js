@@ -340,15 +340,8 @@ function renderDmTurn(data) {
       + (dc !== undefined ? ` (Cần: ${dc})` : '')
       + `</div>`
     );
-  } else if (mechanics.success !== undefined) {
-    // Không có dice (auto success/fail) — vẫn hiện kết quả
-    const resultIcon = mechanics.success ? '✅' : '❌';
-    const resultLabel = mechanics.success ? 'Thành công' : 'Thất bại';
-    logParts.push(
-      `<div class="turn-roll ${mechanics.success ? 'roll-success' : 'roll-fail'}">`
-      + `${resultIcon} <strong>${resultLabel}</strong></div>`
-    );
   }
+  // Không có dice (auto success/fail) -> ẩn dòng kết quả, không có gì để "roll" cả.
 
   // 1b. Thay đổi chỉ số
   const changes = mechanics.changes;

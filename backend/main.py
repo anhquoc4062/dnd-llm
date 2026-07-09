@@ -291,14 +291,24 @@ async def get_game():
 # giấu khỏi UI, chỉ gắn vào system prompt cho DM đọc (xem campaign.py).
 # ---------------------------------------------------------------------------
 
-@app.get("/campaign_seeds")
-async def campaign_seeds():
-    """AI tự bịa 5 campaign seed, mỗi cái một 'vị' (thể loại) khác nhau.
-    Trả về ĐẦY ĐỦ dữ liệu (kể cả phần bí mật) — frontend chỉ RENDER field
-    'theme' trong dropdown, giữ nguyên phần còn lại trong state JS để gửi lại
-    lúc tạo nhân vật, không hiển thị gì thêm cho người chơi thấy."""
-    seeds = campaign.generate_campaign_seeds()
-    return {"seeds": seeds}
+@app.get("/campaign_hooks")
+async def campaign_hooks():
+    """AI chỉ bịa nhanh 5 câu hook (theme), KHÔNG khai triển main_goal/plot/
+    npcs/monsters/boss — phần đó tốn thời gian nên chỉ làm sau khi người chơi
+    đã chọn 1 trong 5 (xem /campaign_seed/expand_hook)."""
+    hooks = campaign.generate_campaign_hooks()
+    return {"hooks": hooks}
+
+
+@app.post("/campaign_seed/expand_hook")
+async def campaign_seed_expand_hook(data: dict):
+    """Người chơi đã chọn 1 trong 5 hook do AI gợi ý (bấm 'Xác nhận') -> khai
+    triển ĐÚNG hook đó thành đầy đủ cấu trúc campaign seed."""
+    theme = (data.get("theme") or "").strip()
+    if not theme:
+        return {"error": "Thiếu kịch bản đã chọn."}
+    result = campaign.expand_campaign_hook(theme)
+    return result
 
 
 @app.post("/campaign_seed/expand")
@@ -855,9 +865,23 @@ async def chat(data: dict):
     if adv_reason:
         reason_str = f" (due to {adv_reason['type']}: {adv_reason['name']})"
 
+    ATTR_LABELS = {
+        "str": "STR/Sức mạnh", "dex": "DEX/Nhanh nhẹn", "con": "CON/Thể chất",
+        "int": "INT/Trí tuệ", "wis": "WIS/Khôn ngoan", "cha": "CHA/Sức hút",
+    }
+    attribute_note = ""
+    if attribute:
+        attribute_label = ATTR_LABELS.get(attribute.lower(), attribute.upper())
+        attribute_note = (
+            f" The attribute actually used for this check was {attribute_label} — if your "
+            f"\"reasoning\" field mentions a specific stat, it MUST be this one, never a "
+            f"different stat, even if another stat would seem more fitting narratively."
+        )
+
     dice_fact = (
         f"INTERNAL MECHANICS (never mention numbers/DC/AC/roll in story): "
-        f"outcome={'SUCCESS' if success else 'FAIL'}, roll_type={roll_type}{reason_str}. "
+        f"outcome={'SUCCESS' if success else 'FAIL'}, roll_type={roll_type}{reason_str}."
+        f"{attribute_note} "
         f"If roll_type is disadvantage/advantage, the story may subtly hint at the reason "
         f"(e.g. character struggling due to their weakness) WITHOUT naming stats or rules."
     )

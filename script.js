@@ -25,8 +25,8 @@ const state = {
   skills: [],      // [{key, vi, en}]
   items: [],       // [{key, vi, en}]
   campaignMode: 'ai',      // 'ai' | 'custom'
-  campaignSeeds: [],       // 5 seed đầy đủ (chỉ theme được render, phần còn lại giấu khỏi UI)
-  campaignSeed: null,      // seed đã chọn/khai triển — gửi kèm lúc tạo nhân vật
+  campaignHooks: [],       // 5 câu hook ngắn (chỉ theme) — chọn 1 rồi bấm "Xác nhận" mới khai triển đầy đủ
+  campaignSeed: null,      // seed đã khai triển đầy đủ (sau khi xác nhận) — gửi kèm lúc tạo nhân vật
 };
 
 /* ---------------------------- UTIL -------------------------------------- */
@@ -151,7 +151,7 @@ function updateCounters(){
 /* ---------------------------- STAT COMPUTATION --------------------------- */
 
 function computeStats(){
-  const attrs = { str:8, dex:8, con:8, int:8, wis:8, cha:8 };
+  const attrs = { str:10, dex:10, con:10, int:10, wis:10, cha:10 };
   let extraHP = 0, extraMana = 0;
 
   const race = RACES.find(r => r.id === state.raceId);
@@ -175,13 +175,11 @@ function computeStats(){
   const xpTarget = cls ? cls.xpTarget : 100;
   const manaAttr = cls ? cls.manaAttr : 'int';
 
-  // Mốc "trung bình" của hệ thống này là 8 (điểm khởi đầu mọi stat trước khi
-  // cộng race/class/trait), KHÔNG phải 10 như chuẩn D&D — dùng nhầm mốc 10 ở
-  // đây từng khiến MỌI nhân vật bị trừ oan 10 HP / 6 Mana ngay từ đầu, làm các
-  // class máu mỏng (vd Pháp Sư 18 HP) kết hợp chủng tộc trừ CON tụt xuống HP
-  // gần 0 dù chưa vào game.
-  const hp = Math.max(1, baseHP + (attrs.con - 8) * 5 + extraHP);
-  const mana = Math.max(0, baseMana + (attrs[manaAttr] - 8) * 3 + extraMana);
+  // Mốc "trung bình" là 10 (chuẩn D&D 5e, modifier 0) — điểm khởi đầu mọi stat
+  // trước khi cộng race/class/trait. baseHP/baseMana của mỗi class (gameData.js)
+  // đã được tính cho đúng nhân vật "trung bình" này (con/mana-attr = 10).
+  const hp = Math.max(1, baseHP + (attrs.con - 10) * 5 + extraHP);
+  const mana = Math.max(0, baseMana + (attrs[manaAttr] - 10) * 3 + extraMana);
 
   return { attrs, hp, mana, xpTarget };
 }
@@ -195,8 +193,8 @@ function recalcAndRender(){
     const el = byId(k);
     el.textContent = attrs[k];
     el.classList.remove('pos', 'neg', 'neutral');
-    if (attrs[k] > 8) el.classList.add('pos');
-    else if (attrs[k] < 8) el.classList.add('neg');
+    if (attrs[k] > 10) el.classList.add('pos');
+    else if (attrs[k] < 10) el.classList.add('neg');
     else el.classList.add('neutral');
   });
   byId('hp').textContent = hp;
@@ -293,27 +291,59 @@ function setCampaignMode(mode){
 async function generateCampaignSeeds(){
   const btn = byId('campaign-generate-btn');
   const select = byId('campaign-select');
+  const confirmBtn = byId('campaign-confirm-btn');
   btn.disabled = true;
   select.disabled = true;
+  confirmBtn.disabled = true;
   state.campaignSeed = null;
+  state.campaignHooks = [];
   showChosenCampaign(null);
-  setCampaignStatus('⏳ Đang nghĩ ra 5 kịch bản khác nhau (có thể mất một lúc)…');
+  setCampaignStatus('⏳ Đang nghĩ ra 5 câu mở đầu…');
   try{
-    const res = await fetch('/campaign_seeds');
+    const res = await fetch('/campaign_hooks');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
-    state.campaignSeeds = Array.isArray(data.seeds) ? data.seeds : [];
-    select.innerHTML = state.campaignSeeds.length
+    state.campaignHooks = Array.isArray(data.hooks) ? data.hooks : [];
+    select.innerHTML = state.campaignHooks.length
       ? '<option value="">— Chọn 1 kịch bản —</option>' +
-        state.campaignSeeds.map((s, i) => `<option value="${i}">${s.theme}</option>`).join('')
+        state.campaignHooks.map((h, i) => `<option value="${i}">${h}</option>`).join('')
       : '<option value="">— Không tạo được kịch bản, thử lại —</option>';
     select.disabled = false;
-    setCampaignStatus(state.campaignSeeds.length ? '' : 'Không tạo được kịch bản. Hãy thử lại.');
+    setCampaignStatus(state.campaignHooks.length ? 'Chọn 1 kịch bản rồi bấm "Xác nhận".' : 'Không tạo được kịch bản. Hãy thử lại.');
   } catch(e){
-    console.error('Không thể tạo campaign seeds:', e);
+    console.error('Không thể tạo campaign hooks:', e);
     setCampaignStatus('Lỗi kết nối server khi tạo kịch bản. Kiểm tra backend đã chạy chưa.');
   } finally {
     btn.disabled = false;
+  }
+}
+
+async function confirmCampaignHook(){
+  const idx = byId('campaign-select').value;
+  if (idx === ''){ setCampaignStatus('Hãy chọn 1 kịch bản trước.'); return; }
+  const theme = state.campaignHooks[Number(idx)];
+  const confirmBtn = byId('campaign-confirm-btn');
+  confirmBtn.disabled = true;
+  state.campaignSeed = null;
+  showChosenCampaign(null);
+  setCampaignStatus('⏳ Đang khai triển kịch bản đã chọn…');
+  try{
+    const res = await fetch('/campaign_seed/expand_hook', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ theme }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const seed = await res.json();
+    if (seed.error) throw new Error(seed.error);
+    state.campaignSeed = seed;
+    showChosenCampaign(seed.theme);
+    setCampaignStatus('');
+  } catch(e){
+    console.error('Không thể khai triển kịch bản:', e);
+    setCampaignStatus('Lỗi khi khai triển kịch bản. Kiểm tra backend đã chạy chưa.');
+  } finally {
+    confirmBtn.disabled = false;
   }
 }
 
@@ -350,12 +380,13 @@ function initCampaignSeed(){
     btn.addEventListener('click', () => setCampaignMode(btn.dataset.mode));
   });
   byId('campaign-generate-btn').addEventListener('click', generateCampaignSeeds);
+  byId('campaign-confirm-btn').addEventListener('click', confirmCampaignHook);
   byId('campaign-expand-btn').addEventListener('click', expandCustomCampaign);
   byId('campaign-select').addEventListener('change', (e) => {
     const idx = e.target.value;
-    if (idx === ''){ state.campaignSeed = null; showChosenCampaign(null); return; }
-    state.campaignSeed = state.campaignSeeds[Number(idx)];
-    showChosenCampaign(state.campaignSeed.theme);
+    state.campaignSeed = null;
+    showChosenCampaign(null);
+    byId('campaign-confirm-btn').disabled = (idx === '');
   });
 }
 

@@ -7,15 +7,24 @@ Người chơi chỉ thấy đúng 1 câu "theme" (hiển thị trong dropdown l
 vật) — toàn bộ phần còn lại (main_goal/plot/npcs/monsters/boss) bị giấu khỏi
 UI, chỉ được nhét vào system prompt cho DM đọc (xem format_campaign_context).
 
-Có 2 nguồn:
-- generate_campaign_seeds(): AI tự bịa 5 seed, mỗi seed một "vị" khác nhau
-  (thể loại/tông truyện khác nhau hẳn, không phải 5 biến thể na ná nhau).
+Có 3 nguồn:
+- generate_campaign_hooks(): AI chỉ bịa 5 câu "theme" (hook) ngắn, mỗi câu một
+  "vị" khác nhau — KHÔNG sinh main_goal/plot/npcs/monsters/boss ở bước này, để
+  trả kết quả nhanh cho người chơi chọn trước khi tốn thời gian khai triển.
+- expand_campaign_hook(theme): sau khi người chơi chọn 1 trong 5 hook ở trên,
+  khai triển ĐÚNG hook đó (giữ nguyên câu theme) ra đủ cấu trúc
+  main_goal/plot/npcs/monsters/boss.
 - expand_custom_seed(text): người chơi tự viết 1 ý tưởng/theme ngắn, AI khai
   triển ra ĐÚNG cấu trúc như trên, bám sát ý tưởng gốc thay vì bịa lạc đề.
 
-Cả 2 đều bật "think" (qwen3 hỗ trợ chế độ suy luận sâu hơn trước khi trả JSON
-cuối) để kịch bản có chiều sâu/logic hơn — khác với các lệnh gọi khác trong
-game (classify/summarize/narrate) vốn tắt think để lấy tốc độ.
+generate_campaign_hooks() tắt "think" để lấy tốc độ (chỉ sinh vài câu ngắn,
+không cần suy luận sâu). expand_campaign_hook()/expand_custom_seed() vẫn bật
+"think" (qwen3 hỗ trợ chế độ suy luận sâu hơn trước khi trả JSON cuối) để
+kịch bản có chiều sâu/logic hơn.
+
+generate_campaign_seeds() (bịa cả 5 seed đầy đủ cùng lúc) vẫn được giữ lại
+làm hàm nội bộ dùng chung logic khai triển, nhưng UI không còn gọi thẳng nó
+nữa vì quá chậm (sinh 5x nội dung chi tiết dù chỉ 1 cái được chọn).
 """
 
 import json
@@ -29,6 +38,9 @@ CAMPAIGN_MODEL = "qwen3:14b"
 # kịp in JSON, khiến content trả về rỗng dù không có lỗi nào được raise.
 CAMPAIGN_OPTIONS = {"num_ctx": 8192, "num_predict": 6000, "temperature": 0.95}
 EXPAND_OPTIONS = {"num_ctx": 8192, "num_predict": 3500, "temperature": 0.9}
+# Chỉ sinh vài câu ngắn -> ngân sách token nhỏ hơn nhiều, và think=False vì
+# không cần suy luận sâu cho việc bịa 1 câu hook.
+HOOKS_OPTIONS = {"num_ctx": 4096, "num_predict": 1200, "temperature": 0.95}
 
 SEED_COUNT = 5
 
@@ -155,6 +167,185 @@ def _parse_campaign_json(reply: str):
         return json.loads(clean)
     except json.JSONDecodeError:
         return None
+
+
+# ---------------------------------------------------------------------------
+# 5 hook (chỉ câu "theme") do AI tự bịa — nhanh, để người chơi chọn trước khi
+# tốn thời gian khai triển đầy đủ
+# ---------------------------------------------------------------------------
+
+def _build_hooks_prompt() -> str:
+    return f"""You are a D&D 5e campaign designer. Output ONLY a JSON object (no markdown,
+no thinking, be fast) with a single key "hooks": an array of EXACTLY {SEED_COUNT} short hook
+sentences for a solo dark-fantasy campaign.
+
+Each of the {SEED_COUNT} hooks MUST be a genuinely different FLAVOR/GENRE of story — not
+{SEED_COUNT} variations of the same "ancient evil awakens" plot. Spread across distinct vibes
+such as (pick {SEED_COUNT} different ones, your choice): political intrigue/betrayal,
+heist/theft, revenge/personal vendetta, cosmic horror/eldritch dread, survival/wilderness
+disaster, mystery/investigation, war/siege, cursed bloodline/tragedy, rescue/hostage, forbidden
+knowledge/cult. No two hooks may share the same core vibe, and each of the {SEED_COUNT} hooks
+MUST imply a DIFFERENT WORLD/PLACE from the others — do not reuse the same kingdom/city/region
+across hooks, even implicitly.
+
+SETTING: D&D 5e MEDIEVAL DARK-FANTASY (swords, bows, magic, curses, gods, undead, fey,
+aberrations). You are NOT limited to the Forgotten Realms specifically — feel free to invent
+an original world/region/culture for each hook (its own geography, faction, myth, or curse)
+rather than defaulting to generic "the kingdom"/"the realm" phrasing. NEVER introduce sci-fi/
+technological/modern elements: no robots, holograms, simulations, computers/code, lasers/
+plasma, drones, cyberpunk, or "reality is a simulation/matrix" framing. A hook about illusion/
+false reality/stolen identity must be framed through MAGIC (a trickster god's curse, a fey
+mirror-realm, a mad archmage's dream-prison, a doppelganger plot) — never through technology.
+
+Each hook: ONE sentence in Vietnamese, SECOND PERSON ("Bạn là...", "Bạn bị...", "Bạn vừa...",
+etc.), max ~35 words. It must do BOTH of:
+(a) tell the player WHAT ROLE/SITUATION they are in, with one concrete, specific WRONGNESS or
+    UNANSWERED QUESTION that makes them want to know "why/how/who" — not just a mood or a job
+    description. A flat statement like "Bạn là một thợ săn tiền thưởng trong một thành phố đầy
+    tội phạm" is BAD (no mystery, just a job).
+(b) sketch a glimpse of the WORLD itself — name or hint at a specific place, faction, myth,
+    law, or phenomenon that makes this world feel strange/distinct (not just "a dangerous
+    land"). The mystery should feel bigger than just the player's personal situation.
+Stay intriguing and do NOT spoil any plot twist (there is no plot behind it yet — that gets
+written later only for the hook the player picks).
+
+VARY THE DEVICE across the {SEED_COUNT} hooks — do not lean on the same trick twice. In
+particular, DO NOT use "nhận được một lá thư/bức thư" (receiving a letter/note) more than
+ONCE across the set; prefer other devices such as:
+- an impossible/contradictory fact about the player ("...nhưng không ai nhớ bạn từng ở đó")
+- a physical mark/wound/object on the player they can't explain
+- a place, law, or ritual specific to this world that the player is entangled in
+- someone/something reacting to the player in a way that doesn't make sense yet
+- a countdown or consequence already in motion ("...trước khi [cụ thể] xảy ra lần nữa")
+- a betrayal or reveal already half-visible but not yet named
+- the player waking into/being thrust into an already-strange location or event
+Avoid generic fantasy flavor text with no hook (no plain "bạn là chiến binh/pháp sư trong một
+vùng đất nguy hiểm" with nothing unresolved attached).
+
+Model the SPECIFICITY, world-glimpse, and dangling-question quality of these examples (do not
+reuse them verbatim, and do not copy their exact phrasing/structure either):
+"Bạn là người duy nhất nhận ra danh tính của mình đã bị đánh cắp trong thành phố Vaelthorn, nơi
+không ai còn nhớ bạn từng tồn tại.", "Bạn tỉnh dậy trong quan tài của chính mình giữa nghĩa
+địa của một dòng tu đã bị giải tán 200 năm trước, với ngày mất khắc sẵn trên bia — chỉ thiếu
+ngày, tháng.", "Ba người trước bạn từng đeo chiếc nhẫn của gia tộc Draumeir, và cả ba đều biến
+mất đúng đêm trăng tròn thứ bảy sau khi nhận nó.", "Bạn là sứ giả duy nhất sống sót trở về từ
+hội nghị hòa bình giữa ba vương triều, nơi mọi phái đoàn khác đều bị giết trong phòng khóa kín."
+
+Output EXACTLY this shape:
+{{"hooks": ["...", "...", "...", "...", "..."]}}"""
+
+
+def generate_campaign_hooks(model: str = None, options: dict = None) -> list:
+    """Gọi model 1 lần (think=False, ngân sách token nhỏ) để bịa nhanh
+    SEED_COUNT câu hook. Không sinh main_goal/plot/npcs/monsters/boss — phần
+    đó chỉ khai triển sau khi người chơi đã chọn (xem expand_campaign_hook).
+    Lỗi/parse hỏng -> fallback về theme mặc định lặp lại (vẫn đủ SEED_COUNT
+    phần tử để UI không vỡ)."""
+    model = model or CAMPAIGN_MODEL
+    options = options or HOOKS_OPTIONS
+
+    try:
+        response = ollama.chat(
+            model=model,
+            messages=[{"role": "system", "content": _build_hooks_prompt()}],
+            format="json",
+            options=options,
+            think=False,
+        )
+        content = response["message"]["content"]
+        parsed = _parse_campaign_json(content)
+        hooks_raw = parsed.get("hooks") if isinstance(parsed, dict) else None
+        if not isinstance(hooks_raw, list):
+            print(
+                f"[DEBUG] generate_campaign_hooks: content không parse được thành hooks "
+                f"hợp lệ (content={content[:200]!r}) -> fallback {SEED_COUNT} default"
+            )
+            hooks_raw = []
+    except Exception as e:
+        print(f"[DEBUG] generate_campaign_hooks lỗi ({e}) -> fallback {SEED_COUNT} default")
+        hooks_raw = []
+
+    hooks = [str(h).strip() for h in hooks_raw[:SEED_COUNT] if str(h).strip()]
+    while len(hooks) < SEED_COUNT:
+        hooks.append(_DEFAULT_CAMPAIGN["theme"])
+    return hooks
+
+
+def _build_expand_hook_prompt(theme: str) -> str:
+    return f"""You are a D&D 5e campaign designer. The player already picked this exact hook
+sentence for their campaign (KEEP IT VERBATIM as "theme" in your output, do not reword it) —
+think carefully, then expand it into a full structured JSON campaign.
+
+CHOSEN HOOK (put back unchanged as "theme"):
+\"\"\"{theme}\"\"\"
+
+SETTING: D&D 5e MEDIEVAL DARK-FANTASY (swords, bows, magic, curses, gods, undead, fey,
+aberrations) — not necessarily the Forgotten Realms; build out whatever original world/place/
+faction/myth the chosen hook already implies. NEVER introduce sci-fi/technological/modern
+elements: no robots, holograms, simulations, computers/code, lasers/plasma, drones, cyberpunk.
+If the hook implies illusion/false reality, reframe it in purely magical/medieval terms (a
+trickster god's curse, a fey mirror-realm, a mad archmage's dream-prison, a doppelganger plot)
+— never through technology.
+
+Every field except "theme" must be written in PLAIN ENGLISH ONLY — no Chinese, no other
+language mixed in, even a single stray word or character.
+
+Output ONLY this JSON object (no markdown):
+{{"theme": "the exact hook given above, unchanged",
+"main_goal": "English, 1-2 sentences — the character's ultimate objective this campaign,
+consistent with the hook",
+"plot": "English, 4-6 sentences. MUST include: (1) a central MYSTERY the player investigates
+through play, (2) a PLOT TWIST behind it the player wouldn't guess from the hook alone, (3)
+at least one MORAL DILEMMA with no clean right answer. Secret, only the DM reads this.",
+"npcs": [{{"name": "English Name", "role": "ally|rival|neutral|antagonist", "desc": "1
+sentence English — their stake in the plot", "personality": "1 sentence English, a distinct
+specific personality/voice/quirk, not generic", "appearance": "1 sentence English, concrete
+visual description (build, clothing, notable features) so the DM can picture and describe
+them consistently — specific, not generic"}}] (2-4 objects),
+"monsters": [{{"name": "English Name", "species": "English, what kind of creature (undead,
+aberration, corrupted animal, construct, human cultist, etc.)", "appearance": "1 sentence
+English, concrete visual description", "moveset": "1 sentence English, 2-3 concrete combat
+actions it uses", "behavior": "1 sentence English, its combat temperament/AI"}}] (3-5 objects,
+NOT plain strings, fitting the hook's genre, varied species/silhouette — not all the same
+creature type),
+"boss": {{"name": "English Name", "desc": "1-2 sentences English", "appearance": "1-2
+sentences English, vivid distinct visual description", "moveset": "1-2 sentences English,
+2-4 signature attacks/abilities including one at low HP if fitting", "behavior": "1 sentence
+English, combat temperament/tactics and how it changes as the fight progresses"}}}}"""
+
+
+def expand_campaign_hook(theme: str, model: str = None, options: dict = None) -> dict:
+    """Khai triển 1 hook (đã chọn từ generate_campaign_hooks) thành đủ cấu
+    trúc campaign. Giữ nguyên theme gốc bất kể model trả về gì (không để
+    model viết lại câu hook người chơi đã thấy và chọn)."""
+    model = model or CAMPAIGN_MODEL
+    options = options or EXPAND_OPTIONS
+    theme = (theme or "").strip()
+
+    try:
+        response = ollama.chat(
+            model=model,
+            messages=[{"role": "system", "content": _build_expand_hook_prompt(theme)}],
+            format="json",
+            options=options,
+            think=True,
+        )
+        content = response["message"]["content"]
+        parsed = _parse_campaign_json(content)
+        if parsed is None:
+            thinking_len = len(response["message"].get("thinking") or "")
+            print(
+                f"[DEBUG] expand_campaign_hook: content không parse được (content={content[:200]!r}, "
+                f"thinking_len={thinking_len}) -> fallback default, giữ theme gốc đã chọn"
+            )
+    except Exception as e:
+        print(f"[DEBUG] expand_campaign_hook lỗi ({e}) -> fallback default, giữ theme gốc đã chọn")
+        parsed = None
+
+    campaign = _normalize_campaign(parsed)
+    if theme:
+        campaign["theme"] = theme
+    return campaign
 
 
 # ---------------------------------------------------------------------------
@@ -287,11 +478,12 @@ below — think carefully, then expand it into the SAME structured JSON shape us
 AI-generated campaign seeds, staying faithful to the player's idea (do not replace it with
 something unrelated; fill gaps creatively but keep their core premise intact).
 
-HARD SETTING CONSTRAINT: this is a D&D 5e MEDIEVAL DARK-FANTASY world (Forgotten Realms) —
-swords, bows, magic, curses, gods, undead, fey, aberrations. Even if the player's idea sounds
-sci-fi/modern (e.g. "trapped in a simulation"), you MUST reframe it in purely magical/medieval
-terms (a trickster god's curse, a fey mirror-realm, a mad archmage's dream-prison) — NEVER
-introduce robots, holograms, computers/code, lasers/plasma, drones, or cyberpunk elements.
+SETTING: D&D 5e MEDIEVAL DARK-FANTASY (swords, bows, magic, curses, gods, undead, fey,
+aberrations) — not necessarily the Forgotten Realms; build out whatever original world/place
+the player's idea implies. Even if the player's idea sounds sci-fi/modern (e.g. "trapped in a
+simulation"), you MUST reframe it in purely magical/medieval terms (a trickster god's curse, a
+fey mirror-realm, a mad archmage's dream-prison) — NEVER introduce robots, holograms,
+computers/code, lasers/plasma, drones, or cyberpunk elements.
 
 Every field except "theme" must be written in PLAIN ENGLISH ONLY — no Chinese, no other
 language mixed in, even a single stray word or character.
