@@ -44,6 +44,11 @@ def init_entity_tables(conn: sqlite3.Connection):
         c.execute("ALTER TABLE entity ADD COLUMN attack_bonus INTEGER DEFAULT 3")
     if "damage_dice" not in existing_entity_cols:
         c.execute("ALTER TABLE entity ADD COLUMN damage_dice TEXT DEFAULT '1d6'")
+    if "gender" not in existing_entity_cols:
+        # Không có field này -> DM phải tự đoán giới tính qua tên mỗi lượt,
+        # dễ đoán sai/không nhất quán (vd narrate "anh ta" 1 lượt rồi "cô ta"
+        # lượt sau cho cùng 1 NPC). Chỉ áp dụng ý nghĩa cho type='npc'.
+        c.execute("ALTER TABLE entity ADD COLUMN gender TEXT")
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS world_loot(
@@ -142,7 +147,9 @@ def format_entities_context(conn: sqlite3.Connection, character_id: int) -> str:
             tag = "MONSTER" if e["entity_type"] == "monster" else "NPC"
             hostility = " [hostile]" if e["hostile"] else ""
             status = " [status]" if e["status"] else ""
-            lines.append(f"- key=\"{e['key']}\" [{tag}] {e['name']}: HP {e['hp']}/{e['max_hp']} AC {e['ac']}{hostility} STATUS: {status}")
+            gender_val = e["gender"] if "gender" in e.keys() else None
+            gender_tag = f" [gender: {gender_val}]" if gender_val else ""
+            lines.append(f"- key=\"{e['key']}\" [{tag}] {e['name']}{gender_tag}: HP {e['hp']}/{e['max_hp']} AC {e['ac']}{hostility} STATUS: {status}")
     else:
         lines.append("No NPCs/monsters currently active in the scene.")
 
@@ -218,13 +225,15 @@ def apply_entity_changes(conn: sqlite3.Connection, character_id: int, entities_p
             attack_bonus = _safe_int(item.get("attack_bonus", 3), 3)
             attack_bonus = max(0, min(attack_bonus, 10))
             damage_dice = _sanitize_dice(item.get("damage_dice"))
+            gender_raw = str(item.get("gender") or "").strip().lower()
+            gender = gender_raw if gender_raw in ("male", "female") else None
             c.execute(
                 """INSERT INTO entity
                 (character_id, key, name, entity_type, hp, max_hp, ac, attack_bonus, damage_dice,
-                hostile, status, first_seen_turn, last_seen_turn)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'alive', ?, ?)""",
+                hostile, status, first_seen_turn, last_seen_turn, gender)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'alive', ?, ?, ?)""",
                 (character_id, key, name, entity_type, hp, max_hp, ac, attack_bonus, damage_dice,
-                 hostile, turn_number, turn_number),
+                 hostile, turn_number, turn_number, gender),
             )
     conn.commit()
 

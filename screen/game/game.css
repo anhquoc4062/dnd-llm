@@ -110,6 +110,7 @@ html, body{
   white-space: pre-wrap;
 }
 .msg.dm{
+  position: relative;
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-left: 3px solid var(--gold);
@@ -118,6 +119,38 @@ html, body{
   font-style: italic;
   font-size: 18px;
   font-weight: 500;
+}
+
+.retry-btn{
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+  font-size: 13px;
+  font-style: normal;
+  cursor: pointer;
+  padding: 0;
+  opacity: 0.55;
+  transition: opacity .15s ease, border-color .15s ease, transform .15s ease, color .15s ease;
+}
+.retry-btn:hover{
+  opacity: 1;
+  border-color: var(--gold);
+  color: var(--gold-bright);
+  transform: rotate(75deg);
+}
+.retry-btn:disabled{
+  opacity: 0.35;
+  cursor: not-allowed;
+  transform: none;
 }
 .msg.user{
   background: rgba(202,164,86,0.1);

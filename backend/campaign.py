@@ -93,7 +93,7 @@ _DEFAULT_BIBLE = {
     ],
     "npcs": [
         {
-            "key": "unknown_informant", "name": "Unknown Informant", "role": "ally",
+            "key": "unknown_informant", "name": "Unknown Informant", "gender": "male", "role": "ally",
             "desc": "A cautious contact with fragments of the truth.",
             "personality": "Speaks only in half-truths and riddles, terrified of being overheard.",
             "appearance": "Gaunt, cloaked figure with ink-stained fingers and a nervous twitch.",
@@ -281,9 +281,11 @@ def _normalize_bible(obj: dict) -> dict:
     if isinstance(npcs_raw, list):
         for i, n in enumerate(npcs_raw):
             if isinstance(n, dict) and n.get("name"):
+                gender_raw = s(n, "gender").lower()
                 npcs.append({
                     "key": _slugify(n.get("key") or n.get("name"), f"npc_{i + 1}"),
                     "name": s(n, "name"),
+                    "gender": gender_raw if gender_raw in ("male", "female") else "",
                     "role": s(n, "role", "npc"),
                     "desc": s(n, "desc"),
                     "personality": s(n, "personality"),
@@ -605,11 +607,12 @@ story_milestones escalate when they do)
    State their relationship to the player and (if relevant) to each other. Factions give the DM
    something to move even when the player isn't looking.
 
-7. NPCs — 3-5 named NPCs. For EACH you must give: what they WANT (motivation), who they TRUST,
-   who they DISTRUST/fear, a SECRET they're hiding (can be small), and — critically —
-   autonomous_behavior: literally what this NPC is doing turn-to-turn if the player never
-   interacts with them (their own agenda in motion). This is what stops NPCs from just standing
-   in place waiting to be talked to.
+7. NPCs — 3-5 named NPCs. For EACH you must give: gender ("male"/"female" — fixed ground truth
+   for pronouns so the small DM model never has to guess/switch mid-campaign), what they WANT
+   (motivation), who they TRUST, who they DISTRUST/fear, a SECRET they're hiding (can be small),
+   and — critically — autonomous_behavior: literally what this NPC is doing turn-to-turn if the
+   player never interacts with them (their own agenda in motion). This is what stops NPCs from
+   just standing in place waiting to be talked to.
 
 8. KEY LOCATIONS — 3-6 concrete NAMED places tied to the story (never generic "a forest"),
    INCLUDING the starting_location itself as one of them (reuse the exact same name). For each,
@@ -698,8 +701,8 @@ words or phrases anywhere else, not even one. Double-check each field as you wri
     {{"id": "f1", "name": "...", "goal": "...", "methods": "...", "relationship_to_player": "..."}}
   ],
   "npcs": [
-    {{"key": "snake_case_id", "name": "...", "role": "ally|rival|neutral|antagonist", "desc": "...",
-      "personality": "...", "appearance": "...", "motivation": "...", "trusts": "...",
+    {{"key": "snake_case_id", "name": "...", "gender": "male|female", "role": "ally|rival|neutral|antagonist",
+      "desc": "...", "personality": "...", "appearance": "...", "motivation": "...", "trusts": "...",
       "distrusts": "...", "secret": "...", "autonomous_behavior": "..."}}
   ],
   "key_locations": [
@@ -868,7 +871,8 @@ def format_campaign_context(bible: dict, turn_number: int = 0, milestone_index: 
     ) or "None"
 
     npc_lines = "\n".join(
-        f"- {n['name']} ({n['key']}, {n['role']}) — {n['desc']} | personality: {n['personality']} | "
+        f"- {n['name']} ({n['key']}, {n['role']}{', ' + n['gender'] if n.get('gender') else ''}) — "
+        f"{n['desc']} | personality: {n['personality']} | "
         f"appearance: {n['appearance']} | wants: {n['motivation']} | trusts: {n['trusts'] or '-'} | "
         f"distrusts: {n['distrusts'] or '-'} | secret: {n['secret'] or '-'} | "
         f"off-screen right now: {n['autonomous_behavior']}"

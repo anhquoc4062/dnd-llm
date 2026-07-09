@@ -16,6 +16,11 @@ function findIcon(list, name, fallback){
 
 let isGameOver = false;
 
+/* Bubble user/dm của lượt GẦN NHẤT — backend chỉ giữ 1 snapshot (undo 1 cấp),
+   nên nút "Thử lại" chỉ có ý nghĩa trên lượt mới nhất. */
+let lastTurnUserBubble = null;
+let lastTurnDmBubble = null;
+
 /* ---------------------------- Character sheet ---------------------------- */
 
 async function loadCharacter(){
@@ -219,7 +224,13 @@ async function handlePlayerAction(text) {
     if (!text || !text.trim()) return;
     setInputsEnabled(false);
     byId('choices-container').innerHTML = '';
-    addMessage('user', text);
+    // Bắt đầu lượt mới -> lượt trước không còn là "gần nhất" nữa, gỡ nút thử
+    // lại cũ đi (backend chỉ giữ đúng 1 snapshot, retry nút cũ giờ sẽ retry
+    // NHẦM sang lượt vừa gửi này chứ không phải lượt nó đang đứng trên).
+    const oldRetryBtn = byId('chat-container').querySelector('.retry-btn');
+    if (oldRetryBtn) oldRetryBtn.remove();
+
+    const userBubble = addMessage('user', text);
     const loadingEl = addLoading();
 
     try {
@@ -232,7 +243,9 @@ async function handlePlayerAction(text) {
         loadingEl.remove();
 
         // 1. Hiển thị nội dung truyện
-        renderDmTurn(data);
+        const dmBubble = renderDmTurn(data);
+        lastTurnUserBubble = userBubble;
+        lastTurnDmBubble = dmBubble;
 
         // 3. Hiển thị lựa chọn
         renderChoices(data.choices);
@@ -247,6 +260,61 @@ async function handlePlayerAction(text) {
         console.error('Lỗi:', e);
         loadingEl.remove();
         addMessage('dm', '⚠️ Hệ thống gặp lỗi xử lý.');
+    } finally {
+        setInputsEnabled(true);
+    }
+}
+
+/**
+ * Thử lại lượt /chat gần nhất — khôi phục state (HP/mana/gold/xp/entities/
+ * loot/history) về NGAY TRƯỚC lượt đó rồi gọi lại backend với CÙNG hành động,
+ * thay bubble user+dm cũ bằng kết quả mới. Chỉ áp dụng cho lượt mới nhất
+ * (backend chỉ giữ 1 snapshot).
+ */
+async function retryLastTurn(){
+    if (!lastTurnDmBubble) return;
+    const wasGameOver = isGameOver;
+    setInputsEnabled(false);
+    byId('choices-container').innerHTML = '';
+
+    const retryBtn = lastTurnDmBubble.querySelector('.retry-btn');
+    if (retryBtn){ retryBtn.disabled = true; retryBtn.textContent = '⏳'; }
+
+    try {
+        const res = await fetch('/chat/retry', { method: 'POST' });
+        const data = await res.json();
+
+        if (data.error) {
+            addMessage('dm', `⚠️ ${data.error}`);
+            return;
+        }
+
+        if (lastTurnUserBubble) lastTurnUserBubble.remove();
+        if (lastTurnDmBubble) lastTurnDmBubble.remove();
+
+        // Lượt cũ từng khiến chết -> gỡ banner, mở lại input trước khi render lượt mới
+        if (wasGameOver) {
+            const banner = byId('chat-container').querySelector('.death-banner');
+            if (banner) banner.remove();
+            isGameOver = false;
+            byId('custom-action').placeholder = 'Nhập hành động của riêng bạn…';
+        }
+
+        const newUserBubble = addMessage('user', data.replayed_input || '');
+        const newDmBubble = renderDmTurn(data);
+        lastTurnUserBubble = newUserBubble;
+        lastTurnDmBubble = newDmBubble;
+
+        renderChoices(data.choices);
+
+        if (data.mechanics && (data.mechanics.is_dead || data.mechanics.character_died)) {
+            showGameOver();
+        }
+
+        loadCharacter();
+    } catch (e) {
+        console.error('Lỗi khi thử lại:', e);
+        addMessage('dm', '⚠️ Không thể thử lại lượt này.');
     } finally {
         setInputsEnabled(true);
     }
@@ -375,6 +443,10 @@ function renderDmTurn(data) {
   if (mechanics.reasoning) {
     html += `<div class="turn-reasoning">⚠️ ${escapeHtml(mechanics.reasoning)}</div>`;
   }
+
+  // 4. Nút thử lại — chỉ lượt GẦN NHẤT mới thử lại được (backend chỉ giữ 1
+  // snapshot), nút cũ trên bubble trước đó bị gỡ ở nơi gọi hàm này.
+  html += `<button type="button" class="retry-btn" title="Thử lại lượt này (nếu model sinh lỗi)" onclick="retryLastTurn()">↻</button>`;
 
   div.innerHTML = html;
   container.appendChild(div);

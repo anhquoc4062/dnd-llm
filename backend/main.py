@@ -107,7 +107,7 @@ def init_db():
     for col in ("race_en", "character_class_en", "turns_since_event", "region", "npc_pool",
                 "last_result", "weather", "weather_since_turn", "current_turn",
                 "history_summary", "summarized_up_to_turn", "campaign_theme", "campaign_data",
-                "campaign_milestone_index"):
+                "campaign_milestone_index", "pre_turn_snapshot"):
         if col not in existing_cols:
             if col in int_cols_default_0:
                 c.execute(f"ALTER TABLE character ADD COLUMN {col} INTEGER DEFAULT 0")
@@ -224,6 +224,94 @@ def _load_campaign_bible(char) -> dict | None:
         except (TypeError, json.JSONDecodeError):
             return None
     return None
+
+
+# ---------------------------------------------------------------------------
+# Retry lượt gần nhất — undo 1 cấp (xem nút "🔄 Thử lại" trên message bubble)
+# ---------------------------------------------------------------------------
+
+def _snapshot_pre_turn(conn, char_id: int, user_input: str):
+    """Chụp lại TOÀN BỘ state có thể bị đổi trong 1 lượt /chat (character row,
+    entity, world_loot, mốc history hiện tại) NGAY TRƯỚC KHI xử lý lượt đó —
+    để nút "Thử lại" trên UI khôi phục đúng về đây rồi chạy lại CÙNG
+    user_input, nếu model lỡ sinh lỗi (lộ tên NPC, quái sai roster, lẫn tiếng
+    Trung...). Ghi đè snapshot cũ mỗi lượt -> chỉ thử lại được lượt GẦN NHẤT,
+    không phải toàn bộ lịch sử (đủ dùng cho "lỡ tay" tức thời, không phải undo
+    vô hạn)."""
+    c = conn.cursor()
+    char_row = c.execute("SELECT * FROM character WHERE id = ?", (char_id,)).fetchone()
+    if not char_row:
+        return
+    char_dict = dict(char_row)
+    char_dict.pop("pre_turn_snapshot", None)  # đừng lồng snapshot vào chính nó
+
+    entity_rows = [dict(r) for r in c.execute(
+        "SELECT * FROM entity WHERE character_id = ?", (char_id,)
+    ).fetchall()]
+    loot_rows = [dict(r) for r in c.execute(
+        "SELECT * FROM world_loot WHERE character_id = ?", (char_id,)
+    ).fetchall()]
+    max_history_id = c.execute("SELECT COALESCE(MAX(id), 0) AS m FROM history").fetchone()["m"]
+
+    snapshot = {
+        "user_input": user_input,
+        "character": char_dict,
+        "entities": entity_rows,
+        "world_loot": loot_rows,
+        "max_history_id": max_history_id,
+    }
+    c.execute(
+        "UPDATE character SET pre_turn_snapshot = ? WHERE id = ?",
+        (json.dumps(snapshot, ensure_ascii=False), char_id),
+    )
+    conn.commit()
+
+
+def _restore_pre_turn(conn, char_id: int) -> str | None:
+    """Khôi phục state từ pre_turn_snapshot (nếu có), trả về user_input đã lưu
+    để gọi lại y hệt lượt vừa rồi. Trả None nếu chưa có lượt /chat nào để thử
+    lại (vd vừa /start_game xong, chưa hành động lần nào)."""
+    c = conn.cursor()
+    row = c.execute("SELECT pre_turn_snapshot FROM character WHERE id = ?", (char_id,)).fetchone()
+    if not row or not row["pre_turn_snapshot"]:
+        return None
+    try:
+        snap = json.loads(row["pre_turn_snapshot"])
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+    char_fields = snap.get("character") or {}
+    cols = [k for k in char_fields.keys() if k not in ("id", "pre_turn_snapshot")]
+    if cols:
+        set_clause = ", ".join(f"{col} = ?" for col in cols)
+        values = [char_fields[col] for col in cols]
+        c.execute(f"UPDATE character SET {set_clause} WHERE id = ?", (*values, char_id))
+
+    c.execute("DELETE FROM entity WHERE character_id = ?", (char_id,))
+    for e in snap.get("entities") or []:
+        e = {k: v for k, v in e.items() if k != "id"}
+        if not e:
+            continue
+        cols2 = list(e.keys())
+        c.execute(
+            f"INSERT INTO entity ({', '.join(cols2)}) VALUES ({', '.join('?' * len(cols2))})",
+            [e[k] for k in cols2],
+        )
+
+    c.execute("DELETE FROM world_loot WHERE character_id = ?", (char_id,))
+    for l in snap.get("world_loot") or []:
+        l = {k: v for k, v in l.items() if k != "id"}
+        if not l:
+            continue
+        cols3 = list(l.keys())
+        c.execute(
+            f"INSERT INTO world_loot ({', '.join(cols3)}) VALUES ({', '.join('?' * len(cols3))})",
+            [l[k] for k in cols3],
+        )
+
+    c.execute("DELETE FROM history WHERE id > ?", (snap.get("max_history_id", 0),))
+    conn.commit()
+    return snap.get("user_input")
 
 
 def _item_matches(item, name):
@@ -579,6 +667,13 @@ Killing a monster: do NOT invent xp/gold — backend auto-awards on status="dead
 changes.xp/gold at 0 for the kill. Non-combat rewards (quest turn-in, payment, treasure,
 progress): your call, set changes yourself. Failure: HP loss / mana loss / concrete story
 setback — always mechanical, never just narrative.
+HP LOSS MUST COME FROM A REAL RESOLVED ATTACK, never invented: if success=true this turn,
+changes.hp CANNOT be negative — the backend forces it to 0 regardless of what you write. A
+brand-new hostile monster you introduce THIS turn cannot deal damage the same turn it appears
+(it isn't in ACTIVE ENTITIES yet, so the backend has no real attack roll for it) — narrate its
+entrance as a threat/ambush/lunge that hasn't connected yet ("lao tới nhưng chưa kịp trúng đòn"),
+not as a landed hit. Its attack only actually lands (and deals real rolled damage) starting NEXT
+turn once it exists in ACTIVE ENTITIES and the backend resolves its attack roll for you.
 
 ## DEATH RULE
 Damage reduces HP to <=0 this turn -> mechanics.character_died=true, choices=[] (story ends).
@@ -601,6 +696,12 @@ beyond combat damage (item spent, worse outcome, moral compromise, info revealed
 should leverage something SPECIFIC to this character (race/class/strength/weakness from the
 sheet, not generic) whenever the scene plausibly allows it — e.g. a Dwarf reading stonework, a
 Rogue picking a lock quietly; reference the exact sheet entry, never invent a trait not on it.
+
+CONSISTENCY WITH STORY TEXT: never name an NPC/creature in a choice unless that exact name (or
+an unambiguous description of them, e.g. "lão già", "tên lính canh") already appeared in THIS
+turn's story text or was established in an earlier turn. If the story only just introduced
+someone as "một bóng người"/"một người lạ" without naming them yet, choices must refer to them
+the same vague way too — never let a choice leak a name the player hasn't been told yet.
 
 ## SCENE CONTINUITY
 [CURRENT SCENE STATE] each turn is the ONLY truth for where the character is — never move
@@ -632,6 +733,11 @@ weak=0-2, average=3-5, strong=6-8, boss=9-10), damage_dice (5e notation, e.g. "1
 hostile (bool). These are set ONCE and drive all later attack rolls to/from it — match how the
 story describes it (a lightly-clad goblin ≠ AC 18). You never compute hit/damage yourself —
 backend rolls it, you only narrate the result.
+gender ("male"|"female"): REQUIRED whenever the entity is a PERSON (human/humanoid) — even if
+type="monster" because they're hostile (e.g. a cultist, a rival, a bandit are still people).
+Skip only for genuinely non-human/genderless creatures (beasts, constructs, aberrations, undead
+without a clear human identity). Set once at creation, becomes the fixed ground truth for
+pronouns ("anh ta"/"cô ta" etc.) every future turn — never switch a named person's gender.
 NEW hostile monster MUST come from the CAMPAIGN's MONSTER ROSTER if one fits (exact name/
 appearance/moveset/behavior) — don't default to a generic creature out of habit.
 CONSISTENCY: the entity you write MUST match what the story text this turn just described —
@@ -650,7 +756,9 @@ loot without declaring it via loot_dropped first.
 
 ## LANGUAGE
 100% Vietnamese output, no exceptions, even in unclear/conflicting cases — just decide silently
-and continue in Vietnamese. Monster and location names stay English.
+and continue in Vietnamese. NEVER mix in Chinese, English, or any other language/script — not
+even a single stray character inside an otherwise-Vietnamese word. Monster and location names
+stay English (only those, nothing else).
 
 ## OUTPUT FORMAT (Vietnamese only for story/choices, JSON keys in English)
 Do NOT output "success"/"roll_type" — backend already decided those; writing them wastes budget.
@@ -664,7 +772,8 @@ Do NOT output "success"/"roll_type" — backend already decided those; writing t
     "changes": {{"hp": 0, "mana": 0, "gold": 0, "xp": 0, "items_added": [], "items_removed": []}},
     "entities": [
       {{"key": "<unique_entity_key>", "name": "<entity_name>", "type": "monster|npc|companion|object",
-        "max_hp": 0, "hp": 0, "ac": 12, "hostile": false, "status": "alive|dead"}}
+        "gender": "male|female (omit/null if not a person)", "max_hp": 0, "hp": 0, "ac": 12,
+        "hostile": false, "status": "alive|dead"}}
     ],
     "loot_dropped": [{{"name": "<item_name>", "source_key": "<entity_key>"}}]
   }},
@@ -704,6 +813,10 @@ milestone_complete: set true ONLY on the turn where the story you just wrote cle
 the CURRENT MILESTONE's description from the CAMPAIGN BIBLE above (per the campaign section's
 CURRENT MILESTONE line) — this unlocks the next milestone and possibly new secrets for future
 turns, so don't set it early/speculatively, and don't forget to set it once it's genuinely true.
+
+FINAL CHECK before you write "story": every single word must be Vietnamese — re-read each word
+as you write it; if any character isn't Vietnamese (Chinese, English, or otherwise, other than
+an English monster/location name), fix it immediately, don't let it slip through.
 """
 
 
@@ -725,6 +838,13 @@ async def chat(data: dict):
     char = get_latest_character()
     if not char:
         return {"error": "Chưa có nhân vật."}
+
+    # Chụp state NGAY TRƯỚC khi xử lý lượt này -> cho phép nút "Thử lại" ở
+    # frontend khôi phục về đây nếu model sinh lỗi ở lượt sắp chạy.
+    conn_snap = get_conn()
+    _snapshot_pre_turn(conn_snap, char["id"], user_input)
+    conn_snap.close()
+
     char_dict = character_row_to_dict(char)
     suspicious = _mentions_missing_item(user_input, char_dict)
 
@@ -1083,7 +1203,17 @@ async def chat(data: dict):
             print(f"[DEBUG] success=False nhưng hp=+{hp_delta} -> ép về -{abs(hp_delta) or 5}")
             changes["hp"] = -abs(hp_delta) if hp_delta != 0 else -5
         elif success and hp_delta < 0:
-            changes["hp"] = -abs(hp_delta) if hp_delta != 0 else 10
+            # success=True nhưng model tự bịa HP âm (không qua đường damage đã
+            # roll thật ở khối "if damage or contest_type in (...)" phía trên —
+            # nếu qua đường đó thì changes["hp"] đã được ép đúng dấu từ trước
+            # rồi, không rơi vào đây). Đây luôn là damage KHÔNG có xúc xắc thật
+            # đứng sau (vd quái mới xuất hiện "tấn công phủ đầu" nhưng chưa
+            # từng được resolve_action() roll) -> không tính là đòn trúng thật,
+            # ép về 0. Model chỉ được gây mất máu qua roll_type/dice thật, hoặc
+            # đợi lượt sau khi quái đó đã nằm trong ACTIVE ENTITIES để backend
+            # tự roll đòn tấn công của nó (xem "attacker_entity" ở resolve_action).
+            print(f"[DEBUG] success=True nhưng hp={hp_delta} không qua damage roll thật -> ép về 0")
+            changes["hp"] = 0
 
         # --- RAG: entity/loot xử lý TRƯỚC khi apply items_added, vì cần
         # ledger loot mới nhất để validate ---
@@ -1191,6 +1321,29 @@ async def chat(data: dict):
     conn.commit()
     conn.close()
 
+    return result
+
+
+@app.post("/chat/retry")
+async def chat_retry():
+    """Khôi phục state về NGAY TRƯỚC lượt /chat gần nhất (xem
+    _snapshot_pre_turn/_restore_pre_turn) rồi chạy lại y hệt hành động đó —
+    dùng khi model sinh lỗi (lộ tên NPC chưa giới thiệu, quái ngoài roster,
+    lẫn tiếng khác...). Chỉ thử lại được lượt GẦN NHẤT."""
+    char = get_latest_character()
+    if not char:
+        return {"error": "Chưa có nhân vật."}
+
+    conn = get_conn()
+    replayed_input = _restore_pre_turn(conn, char["id"])
+    conn.close()
+
+    if replayed_input is None:
+        return {"error": "Không có lượt nào để thử lại."}
+
+    result = await chat({"message": replayed_input})
+    if isinstance(result, dict):
+        result["replayed_input"] = replayed_input
     return result
 
 
