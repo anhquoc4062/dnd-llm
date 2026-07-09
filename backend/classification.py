@@ -59,6 +59,8 @@ def _parse_classify_json(reply: str) -> dict:
             "dc": 12,
             "item_or_skill_used": None,
             "item_or_skill_owned": True,
+            "contest_type": "none",
+            "target_key": None,
         }
 
 
@@ -66,7 +68,7 @@ def _parse_classify_json(reply: str) -> dict:
 # Prompt cho lượt classify
 # ---------------------------------------------------------------------------
 
-def build_classify_prompt(char_dict: dict) -> str:
+def build_classify_prompt(char_dict: dict, active_entities: list = None) -> str:
     strengths = ", ".join(
         (t.get("en") or t.get("name") or "") for t in char_dict.get("strengths", [])
     ) or "None"
@@ -76,6 +78,9 @@ def build_classify_prompt(char_dict: dict) -> str:
     skills_list = ", ".join(f"{s.get('vi', s['en'])} ({s['en']})" for s in char_dict["skills"]) or "None"
     items_list = ", ".join(f"{i.get('vi', i['en'])} ({i['en']})" for i in char_dict["items"]) or "None"
     attrs = char_dict["attrs"]
+    entities_list = ", ".join(
+        f"{e['key']}({e['name']}{'|hostile' if e.get('hostile') else ''})" for e in (active_entities or [])
+    ) or "None"
 
     return f"""You are a D&D 5e rules referee. Do NOT narrate. Output ONLY JSON.
 
@@ -85,6 +90,7 @@ Strengths: {strengths}
 Weaknesses: {weaknesses}
 Skills: {skills_list}
 Items: {items_list}
+Active entities in scene (key(name|hostile)): {entities_list}
 
 TASK: Read the player's action (may be freely typed in Vietnamese, or a suggested option
 already in Vietnamese). The player will usually refer to skills/items by their Vietnamese
@@ -119,8 +125,22 @@ RULE: combat attacks against an alert hostile target default to DC 14-16.
 
 Only cite ONE reason. Never invent a strength/weakness/skill not on the sheet.
 
+CONTEST TYPE (do NOT decide damage numbers yourself — the backend rolls real dice for these):
+- "attack": the player is directly striking/shooting/casting offensive damage at ONE specific
+  entity from the Active entities list above. Set target_key to that entity's exact key.
+- "hazard": the player is trying to AVOID/RESIST/SURVIVE danger where failure means THEY take
+  damage (dodging a trap, resisting a hit, surviving an ambush/environmental threat). If the
+  danger is a specific HOSTILE entity from the Active entities list directly attacking/striking
+  the player, set target_key to that entity's key (the backend will roll the monster's real
+  attack for you — you only narrate hit/miss afterward). If the danger has no specific entity
+  (a trap, falling, poison gas, generic environmental hazard), target_key is null.
+- "none": no physical damage is at stake either way (social, exploration, pure flavor, non-combat
+  skill use). target_key is always null.
+Never pick "attack" without a valid target_key from the Active entities list; if no matching
+entity exists, use "hazard" or "none" instead.
+
 Output:
-{{"needs_roll": true or false based on player action, "attribute": "dex", "advantage_state": "normal", "advantage_reason": null, "dc": 12, "item_or_skill_used": "Item or Skill used, if not is null", "item_or_skill_owned": true}}
+{{"needs_roll": true or false based on player action, "attribute": "dex", "advantage_state": "normal", "advantage_reason": null, "dc": 12, "item_or_skill_used": "Item or Skill used, if not is null", "item_or_skill_owned": true, "contest_type": "attack"|"hazard"|"none", "target_key": "exact key from Active entities list, or null"}}
 
 advantage_reason format when not null: {{"type": "strength"|"weakness"|"class"|"race"|"item", "name": "exact name from sheet"}}"""
 
@@ -188,6 +208,34 @@ def attr_modifier(score: int) -> int:
     return (score - 10) // 2
 
 
+def proficiency_bonus(level: int) -> int:
+    """5e: +2 ở level 1-4, +3 ở 5-8, +4 ở 9-12... Dùng cho attack bonus,
+    tách biệt khỏi modifier thuần của attribute check."""
+    level = max(1, _safe_int(level, 1))
+    return 2 + (level - 1) // 4
+
+
+DEFAULT_MONSTER_AC = 12
+DEFAULT_MONSTER_ATTACK_BONUS = 3
+DEFAULT_MONSTER_DAMAGE_DICE = "1d6"
+
+
+def flip_advantage(state: str) -> str:
+    """Player disadvantage khi né/chống đỡ = quái CÓ LỢI hơn khi ra đòn (và
+    ngược lại) — dùng khi roll xúc xắc chuyển từ góc nhìn player sang quái."""
+    return {"advantage": "disadvantage", "disadvantage": "advantage"}.get(state, "normal")
+
+
+def sanitize_damage_dice(notation: str) -> str:
+    global _DICE_RE
+    if _DICE_RE is None:
+        import re
+        _DICE_RE = re.compile(r"(\d+)d(\d+)([+-]\d+)?")
+    if notation and _DICE_RE.match(notation.strip()):
+        return notation.strip()
+    return DEFAULT_MONSTER_DAMAGE_DICE
+
+
 def roll_d20(modifier: int, advantage_state: str = "normal") -> dict:
     r1 = random.randint(1, 20)
     if advantage_state == "advantage":
@@ -208,10 +256,77 @@ def roll_d20(modifier: int, advantage_state: str = "normal") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Damage dice — code tự roll sát thương thật (5e-style), không để model tự
+# bịa số HP mất/còn. Vũ khí/kỹ năng được suy ra loại dice qua khớp từ khoá
+# trong tên (EN), không hỏi lại model để tránh model tự chọn dice có lợi cho nó.
+# ---------------------------------------------------------------------------
+
+DAMAGE_DICE_TABLE = [
+    (("dagger", "knife"), "1d4"),
+    (("bow", "arrow", "crossbow", "sling"), "1d8"),
+    (("sword", "blade", "saber", "rapier", "scimitar", "longsword"), "1d8"),
+    (("axe", "hammer", "mace", "club", "warhammer", "maul"), "1d8"),
+    (("spear", "lance", "polearm", "halberd", "glaive"), "1d6"),
+    (("staff", "wand"), "1d6"),
+    (("fire", "flame", "burn", "inferno", "fireball"), "2d6"),
+    (("ice", "frost", "lightning", "shock", "thunder", "arcane", "spell", "magic", "bolt"), "1d10"),
+    (("fist", "punch", "kick", "unarmed", "claw", "bite"), "1d4"),
+]
+DEFAULT_MELEE_DICE = "1d6"
+DEFAULT_SPELL_DICE = "1d8"
+
+# DC tier -> dice sát thương phản đòn khi player THẤT BẠI trong 1 tình huống
+# nguy hiểm (hazard: bẫy, phục kích, đòn phản công của kẻ địch...). DC càng
+# cao (đối thủ/hiểm hoạ càng mạnh) thì phản đòn càng đau — không có stat block
+# quái đầy đủ nên dùng DC làm proxy độ nguy hiểm, vẫn roll dice thật.
+HAZARD_DICE_BY_DC = [
+    (12, "1d4"),
+    (15, "1d6"),
+    (18, "2d6"),
+    (999, "3d6"),
+]
+
+
+def lookup_damage_dice(used_name: str, attribute: str) -> str:
+    if used_name:
+        name_l = used_name.strip().lower()
+        for keywords, dice in DAMAGE_DICE_TABLE:
+            if any(k in name_l for k in keywords):
+                return dice
+    return DEFAULT_SPELL_DICE if attribute in ("int", "wis", "cha") else DEFAULT_MELEE_DICE
+
+
+def hazard_dice_for_dc(dc: int) -> str:
+    for threshold, dice in HAZARD_DICE_BY_DC:
+        if dc <= threshold:
+            return dice
+    return "3d6"
+
+
+_DICE_RE = None
+
+
+def roll_dice(notation: str) -> dict:
+    """Parse '<n>d<sides>[+/-k]' (vd '2d6+1') và roll thật bằng random."""
+    global _DICE_RE
+    if _DICE_RE is None:
+        import re
+        _DICE_RE = re.compile(r"(\d+)d(\d+)([+-]\d+)?")
+    m = _DICE_RE.match((notation or "").strip())
+    if not m:
+        return {"notation": notation, "rolls": [], "bonus": 0, "total": 0}
+    n, sides, bonus = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+    n = max(1, min(n, 10))
+    sides = max(2, min(sides, 20))
+    rolls = [random.randint(1, sides) for _ in range(n)]
+    return {"notation": notation, "rolls": rolls, "bonus": bonus, "total": sum(rolls) + bonus}
+
+
+# ---------------------------------------------------------------------------
 # API cấp cao — main.py chỉ cần gọi 2 hàm này
 # ---------------------------------------------------------------------------
 
-def classify_action(model: str, options: dict, user_input: str, char_dict: dict, known_choices: list = None) -> dict:
+def classify_action(model: str, options: dict, user_input: str, char_dict: dict, known_choices: list = None, active_entities: list = None) -> dict:
     """Gọi model lần 1 để phân loại hành động. Trả về dict đã được làm sạch
     (reason bịa -> ép về normal), sẵn sàng cho resolve_action().
 
@@ -226,7 +341,7 @@ def classify_action(model: str, options: dict, user_input: str, char_dict: dict,
     classify_resp = ollama.chat(
         model=model,
         messages=[
-            {"role": "system", "content": build_classify_prompt(char_dict)},
+            {"role": "system", "content": build_classify_prompt(char_dict, active_entities)},
             {"role": "user", "content": user_input},
         ],
         format="json",
@@ -234,6 +349,31 @@ def classify_action(model: str, options: dict, user_input: str, char_dict: dict,
         think=False,
     )
     classification = _parse_classify_json(classify_resp["message"]["content"])
+
+    # Validate contest_type/target_key thật kỹ — model hay bịa key không tồn
+    # tại hoặc chọn "attack" mà không có mục tiêu hợp lệ. Code tự sửa lại
+    # thay vì tin tưởng, vì đây là cơ sở để tính damage thật ở resolve_action.
+    valid_entities = {(e.get("key") or "").strip().lower(): e for e in (active_entities or [])}
+    contest_type = classification.get("contest_type")
+    if contest_type not in ("attack", "hazard", "none"):
+        contest_type = "none"
+    target_key = (classification.get("target_key") or "").strip().lower() or None
+
+    if contest_type == "attack":
+        if target_key not in valid_entities:
+            contest_type, target_key = ("hazard", None) if target_key is None else ("none", None)
+    elif contest_type == "hazard":
+        # target_key ở hazard chỉ có nghĩa khi trỏ tới 1 entity hostile đang
+        # sống thật (quái đang chủ động tấn công) — nếu không, đây là hazard
+        # chung chung (bẫy/môi trường) và target_key phải bỏ trống.
+        entity = valid_entities.get(target_key)
+        if not entity or not entity.get("hostile"):
+            target_key = None
+    else:
+        target_key = None
+
+    classification["contest_type"] = contest_type
+    classification["target_key"] = target_key
 
     matched_choice = _match_known_choice(user_input, known_choices)
 
@@ -294,11 +434,18 @@ def classify_action(model: str, options: dict, user_input: str, char_dict: dict,
     return classification
 
 
-def resolve_action(classification: dict, char_dict: dict) -> dict:
+def resolve_action(classification: dict, char_dict: dict, active_entities: list = None) -> dict:
     """Kiểm tra tài nguyên thật (item/skill có sở hữu không, đủ mana không,
     còn cooldown không) rồi tung xúc xắc thật. KHÔNG ghi DB — chỉ trả về
     quyết định để main.py áp dụng (tiêu hao item/mana/cooldown) và build
     dice_fact cho prompt của lượt kể chuyện chính.
+
+    ATTACK ROLL vs ABILITY CHECK/SAVE — tách biệt theo đúng luật 5e:
+    - contest_type == "attack": d20 + (attribute modifier + proficiency bonus)
+      so với AC THẬT của entity mục tiêu (lấy từ active_entities, không phải
+      DC do model tự bịa).
+    - contest_type == "hazard"/"none": d20 + attribute modifier so với DC
+      (ability check / saving throw, giữ nguyên cơ chế cũ).
 
     Trả về:
     {
@@ -306,6 +453,7 @@ def resolve_action(classification: dict, char_dict: dict) -> dict:
         "roll_type": "normal"|"advantage"|"disadvantage",
         "dice": dict|None,
         "dc": int,
+        "target_ac": int|None,
         "attribute": str,
         "used_name": str|None,
         "consumed_kind": "item"|"skill"|None,
@@ -321,6 +469,8 @@ def resolve_action(classification: dict, char_dict: dict) -> dict:
     dc = classification.get("dc", 12)
     used_name = classification.get("item_or_skill_used")
     owned = classification.get("item_or_skill_owned", True)
+    contest_type = classification.get("contest_type", "none")
+    target_key = classification.get("target_key")
 
     resource_note = ""
     forced_fail = False
@@ -357,25 +507,90 @@ def resolve_action(classification: dict, char_dict: dict) -> dict:
             forced_fail = True
             resource_note = f"{used_name} does not exist on the character sheet."
 
+    modifier = attr_modifier(char_dict["attrs"].get(attribute, 8))
+
+    target_ac = None
+    if contest_type == "attack" and target_key:
+        target_entity = next(
+            (e for e in (active_entities or [])
+             if (e.get("key") or "").strip().lower() == target_key),
+            None,
+        )
+        target_ac = _safe_int((target_entity or {}).get("ac"), DEFAULT_MONSTER_AC)
+
+    # Nếu "hazard" mà target_key trỏ tới 1 entity hostile đang sống -> đây là
+    # đòn tấn công CHỦ ĐỘNG của quái nhắm vào player. Code tự roll THAY quái
+    # (d20 + attack_bonus của quái vs AC player) thay vì dùng DC do model chọn
+    # — DM chỉ còn việc mô tả trúng/trượt, không còn quyết định kết quả.
+    attacker_entity = None
+    if contest_type == "hazard" and target_key:
+        attacker_entity = next(
+            (e for e in (active_entities or [])
+             if (e.get("key") or "").strip().lower() == target_key and e.get("hostile")),
+            None,
+        )
+
     if forced_fail or not needs_roll:
         dice = None
         success = False if forced_fail else True
         roll_type = adv_state if needs_roll else "normal"
+    elif target_ac is not None:
+        # Attack roll thật (player tấn công): d20 + (modifier + proficiency)
+        # vs AC của mục tiêu, không dùng DC — tách biệt hẳn khỏi ability check.
+        attack_bonus = modifier + proficiency_bonus(char_dict.get("level", 1))
+        dice = roll_d20(attack_bonus, adv_state)
+        success = dice["total"] >= target_ac
+        roll_type = adv_state
+    elif attacker_entity is not None:
+        # Attack roll thật (quái tấn công player): d20 + attack_bonus của quái
+        # vs AC của player. success=True nghĩa là quái TRƯỢT (tốt cho player).
+        monster_adv = flip_advantage(adv_state)
+        monster_attack_bonus = _safe_int(attacker_entity.get("attack_bonus"), DEFAULT_MONSTER_ATTACK_BONUS)
+        player_ac = _safe_int(char_dict.get("ac"), 10)
+        dice = roll_d20(monster_attack_bonus, monster_adv)
+        success = dice["total"] < player_ac
+        roll_type = monster_adv
     else:
-        modifier = attr_modifier(char_dict["attrs"].get(attribute, 8))
         dice = roll_d20(modifier, adv_state)
         success = dice["total"] >= dc
         roll_type = adv_state
+
+    # --- Damage thật, roll bằng code — không để model tự bịa số HP mất/còn ---
+    damage = None
+    if not forced_fail:
+        if contest_type == "attack" and success and target_key:
+            dice_notation = lookup_damage_dice(used_name, attribute)
+            dmg_roll = roll_dice(dice_notation)
+            total = max(1, dmg_roll["total"] + modifier)
+            damage = {"target": "entity", "target_key": target_key, "dice": dmg_roll,
+                      "modifier": modifier, "total": total}
+        elif contest_type == "hazard" and not success and attacker_entity is not None:
+            dice_notation = sanitize_damage_dice(attacker_entity.get("damage_dice"))
+            dmg_roll = roll_dice(dice_notation)
+            total = max(1, dmg_roll["total"])
+            damage = {"target": "player", "target_key": None, "dice": dmg_roll,
+                      "modifier": 0, "total": total}
+        elif contest_type == "hazard" and not success:
+            dice_notation = hazard_dice_for_dc(dc)
+            dmg_roll = roll_dice(dice_notation)
+            total = max(1, dmg_roll["total"])
+            damage = {"target": "player", "target_key": None, "dice": dmg_roll,
+                      "modifier": 0, "total": total}
 
     return {
         "success": success,
         "roll_type": roll_type,
         "dice": dice,
         "dc": dc,
+        "target_ac": target_ac,
         "attribute": attribute,
         "used_name": used_name,
         "consumed_kind": consumed_kind,
         "mana_cost": mana_cost,
         "resource_note": resource_note,
         "adv_reason": adv_reason,
+        "contest_type": contest_type,
+        "target_key": target_key,
+        "damage": damage,
+        "forced_fail": forced_fail,
     }

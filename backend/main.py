@@ -1,5 +1,13 @@
 import json
 import sqlite3
+import sys
+
+# Console Windows mặc định dùng cp1252, không encode được ký tự tiếng Việt
+# (ế, ị, ư...) trong các print(f"[DEBUG] ...") rải khắp codebase -> crash cả
+# request. Ép stdout/stderr sang UTF-8 ngay từ đầu để tránh treo server.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
 import ollama
 from fastapi import FastAPI, Request
@@ -149,6 +157,27 @@ def safe_int(value, default=0):
         return default
 
 
+# Thưởng XP/gold khi giết quái — code tự tính theo tier (suy từ max_hp), không
+# để model tự quyết (trước đây model lúc cộng xp lúc quên, không nhất quán).
+# Ngưỡng max_hp -> (xp, gold dice), tier tăng dần.
+MONSTER_TIER_REWARD = [
+    (10, 10, "2d6"),
+    (25, 25, "3d8"),
+    (50, 50, "4d10"),
+    (100, 100, "6d10"),
+    (10**9, 250, "8d12"),
+]
+
+
+def _monster_kill_reward(max_hp) -> dict:
+    max_hp = safe_int(max_hp, 10)
+    for threshold, xp, gold_dice in MONSTER_TIER_REWARD:
+        if max_hp <= threshold:
+            gold = classification.roll_dice(gold_dice)["total"]
+            return {"xp": xp, "gold": gold}
+    return {"xp": 250, "gold": 0}
+
+
 def _list_json(value):
     """Accepts a list of strings OR a list of dicts and stores them as-is
     (JSON-encoded). Handles both the trait shape [{name, en, note}] and the
@@ -217,6 +246,7 @@ def character_row_to_dict(char: sqlite3.Row) -> dict:
             "wis": char["attr_wis"],
             "cha": char["attr_cha"],
         },
+        "ac": 10 + classification.attr_modifier(char["attr_dex"]),
         "hp": char["hp"],
         "max_hp": char["max_hp"],
         "mana": char["mana"],
@@ -513,7 +543,11 @@ Items: {fmt_list(c['items'])}
   used items, applying cooldowns) is handled by the backend — do not duplicate it.
 
 ## CONSEQUENCES (must show up in mechanics.changes)
-- Success: reward XP/gold/items/story progress as fits.
+- Killing a monster: do NOT invent xp/gold for it yourself — the backend automatically awards
+  both the instant an entity's status becomes "dead", based on its tier. Just set
+  mechanics.entities status to "dead"; leave changes.xp/changes.gold at 0 for the kill itself.
+- Non-combat rewards only (quest turn-in, NPC payment, treasure found, story progress): still
+  your call — set changes.xp/changes.gold/items yourself for these.
 - Failure: HP loss (combat), mana loss (magic), or a concrete story setback (alerted enemies, lost item, dropped guard) — always something mechanical, never just narrative.
 
 ## DEATH RULE
@@ -611,7 +645,15 @@ The player should immediately want to make a meaningful decision.
 - mechanics.entities is OPTIONAL and only needed when: (a) a new NPC/monster appears this
   turn, or (b) an EXISTING one (listed in ACTIVE ENTITIES context) takes damage/heals/dies/flees.
 - NEW entity: include key (short snake_case, unique), name (English), type ("npc"|"monster"),
-  max_hp, hp (usually = max_hp), hostile (true/false).
+  max_hp, hp (usually = max_hp), ac (8-20; weak/unarmored=8-11, average=12-14, armored/tough=15-18,
+  heavily armored/legendary=19-20), attack_bonus (0-10; weak=0-2, average=3-5, strong=6-8,
+  boss/legendary=9-10), damage_dice (5e dice notation matching its weapon/attack, e.g. "1d6",
+  "2d8+2"), hostile (true/false). ac/attack_bonus/damage_dice are set ONCE at creation and used by
+  the backend to resolve every attack roll to/from this entity in later turns (both the player
+  attacking it, and it attacking the player) — pick them to match how the story describes the
+  creature (a lightly-clad goblin should not have AC 18 or attack_bonus 9). You never need to
+  compute the outcome yourself afterward: the backend rolls the dice and tells you who got hit
+  and for how much — you only narrate it.
 - NEW hostile monster source: if the CAMPAIGN section above includes a MONSTER ROSTER, a new
   hostile monster MUST come from that roster (reuse its exact name/appearance/moveset/
   behavior) — do not default to a generic/unrelated creature out of habit when the roster
@@ -646,11 +688,11 @@ Only keep monsters and locations name in English.
 
 
 ## OUTPUT FORMAT (Vietnamese only for story/choices, JSON keys in English)
+Do NOT output "success" or "roll_type" — the backend already rolled the dice and decides
+those; anything you write there is discarded and wastes your output budget.
 {{
   "story": "...",
   "mechanics": {{
-    "success": true,
-    "roll_type": "normal",
     "reasoning": "",
     "event_occurred": false,
     "character_died": false,
@@ -662,6 +704,7 @@ Only keep monsters and locations name in English.
         "type": "monster|npc|companion|object",
         "max_hp": 0,
         "hp": 0,
+        "ac": 12,
         "hostile": false,
         "status": "alive|dead"
       }}
@@ -738,8 +781,13 @@ async def chat(data: dict):
         except (TypeError, json.JSONDecodeError, AttributeError):
             known_choices = None
 
+    conn_pre = get_conn()
+    active_entities = [dict(row) for row in entities.get_active_entities(conn_pre, char["id"])]
+    conn_pre.close()
+
     class_result = classification.classify_action(
-        MODEL, OPTIONS, user_input, char_dict, known_choices=known_choices
+        MODEL, OPTIONS, user_input, char_dict, known_choices=known_choices,
+        active_entities=active_entities,
     )
 
     def _localize_reason_name(reason_type, name, char_dict):
@@ -775,18 +823,23 @@ async def chat(data: dict):
         return choices
 
     # --- Kiểm tra tài nguyên + tung xúc xắc thật (module classification.py) ---
-    resolution = classification.resolve_action(class_result, char_dict)
+    resolution = classification.resolve_action(class_result, char_dict, active_entities=active_entities)
 
     success = resolution["success"]
     roll_type = resolution["roll_type"]
     dice = resolution["dice"]
     dc = resolution["dc"]
+    target_ac = resolution["target_ac"]
     attribute = resolution["attribute"]
     used_name = resolution["used_name"]
     consumed_kind = resolution["consumed_kind"]
     mana_cost = resolution["mana_cost"]
     resource_note = resolution["resource_note"]
     adv_reason = resolution["adv_reason"]
+    contest_type = resolution["contest_type"]
+    target_key = resolution["target_key"]
+    damage = resolution["damage"]
+    forced_fail = resolution["forced_fail"]
 
     # --- Tiêu hao tài nguyên trong DB (bất kể thành công hay fail) ---
     if consumed_kind == "item":
@@ -803,11 +856,33 @@ async def chat(data: dict):
         reason_str = f" (due to {adv_reason['type']}: {adv_reason['name']})"
 
     dice_fact = (
-        f"INTERNAL MECHANICS (never mention numbers/DC/roll in story): "
+        f"INTERNAL MECHANICS (never mention numbers/DC/AC/roll in story): "
         f"outcome={'SUCCESS' if success else 'FAIL'}, roll_type={roll_type}{reason_str}. "
         f"If roll_type is disadvantage/advantage, the story may subtly hint at the reason "
         f"(e.g. character struggling due to their weakness) WITHOUT naming stats or rules."
     )
+
+    attacker_name = None
+    if contest_type == "hazard" and target_key:
+        attacker_name = next(
+            (e.get("name") for e in active_entities
+             if (e.get("key") or "").strip().lower() == target_key),
+            target_key,
+        )
+
+    if target_ac is not None:
+        dice_fact += (
+            f" This was a real ATTACK ROLL (d20 + attack bonus) against the target's Armor "
+            f"Class, NOT a generic ability check — {'it beat' if success else 'it failed to beat'} "
+            f"the target's AC."
+        )
+    elif attacker_name is not None:
+        dice_fact += (
+            f" This was a real ATTACK ROLL made by \"{attacker_name}\" (key={target_key}) against "
+            f"the PLAYER's Armor Class, NOT a decision you get to make — the backend already "
+            f"rolled it and the attack {'MISSED' if success else 'HIT'}. Narrate only that outcome; "
+            f"do not narrate the player dodging/resisting if the roll says it hit, and vice versa."
+        )
 
     if resource_note:
         dice_fact += (
@@ -825,11 +900,48 @@ async def chat(data: dict):
         f"such that final HP does not go below 0 (clamp your intended damage if needed)."
     )
 
-    dice_fact += (
-        f" REMINDER: hp change must be NEGATIVE if the story shows the character taking "
-        f"damage, POSITIVE only for healing, ZERO for no change. Success={success} means "
-        f"the character's intended action actually works — narrate accordingly. Do not negative hp if Success=true"
-    )
+    if contest_type == "none":
+        # Chỉ cần nhắc dấu hp khi lượt này KHÔNG phải combat — vì attack/hazard
+        # đã bị code ép cứng changes.hp ở bước sau bất kể model viết gì, nhắc
+        # ở đây chỉ tốn token vô ích.
+        dice_fact += (
+            f" REMINDER: hp change must be NEGATIVE if the story shows the character taking "
+            f"damage, POSITIVE only for healing, ZERO for no change. Success={success} means "
+            f"the character's intended action actually works — narrate accordingly. Do not negative hp if Success=true"
+        )
+    else:
+        dice_fact += (
+            " You do NOT need to compute changes.hp yourself this turn — the backend already "
+            "decided it from the dice (see DAMAGE fact if any) and will override whatever you "
+            "put. Just set changes.hp to 0."
+        )
+
+    if mana_cost > 0:
+        dice_fact += (
+            f" changes.mana is already handled by the backend (-{mana_cost} for using "
+            f"\"{used_name}\"); just set changes.mana to 0, it will be overridden regardless."
+        )
+
+    if damage:
+        if damage["target"] == "entity":
+            dice_fact += (
+                f" DAMAGE (already rolled by the backend, DO NOT invent a different number): "
+                f"the attack on entity key=\"{damage['target_key']}\" deals EXACTLY {damage['total']} "
+                f"damage ({damage['dice']['notation']}={damage['dice']['rolls']}+{damage['modifier']}). "
+                f"You MUST set mechanics.entities to include {{\"key\": \"{damage['target_key']}\", "
+                f"\"hp_change\": -{damage['total']}}} (mark status dead if it drops to 0). "
+                f"This attack does NOT hurt the player — set mechanics.changes.hp to 0 for this action."
+            )
+        elif damage["target"] == "player":
+            source = f"\"{attacker_name}\"'s attack" if attacker_name else "the danger"
+            dice_fact += (
+                f" DAMAGE (already rolled by the backend, DO NOT invent a different number): "
+                f"{source} hits the character for EXACTLY {damage['total']} damage "
+                f"({damage['dice']['notation']}={damage['dice']['rolls']}). Set mechanics.changes.hp "
+                f"to exactly -{damage['total']}."
+            )
+    elif contest_type == "attack":
+        dice_fact += " This attack MISSED — deal 0 damage to the target entity and mechanics.changes.hp must be 0."
 
     system_prompt = build_system_prompt(char)  # bản gọn ở tin nhắn trước
 
@@ -894,9 +1006,7 @@ async def chat(data: dict):
         messages.append({"role": row["role"], "content": row["content"]})
     messages.append({
         "role": "user",
-        "content": f"{turn_note}\n\n{dice_fact}\n\nPlayer action: {user_input}\n\n"
-                    f"mechanics.success MUST be {str(success).lower()}. "
-                    f"mechanics.roll_type MUST be \"{roll_type}\"."
+        "content": f"{turn_note}\n\n{dice_fact}\n\nPlayer action: {user_input}"
     })
     messages.append({
         "role": "user",
@@ -932,8 +1042,35 @@ async def chat(data: dict):
     result["mechanics"]["roll_type"] = roll_type
     if dice:
         result["mechanics"]["dice"] = dice
-        result["mechanics"]["dc"] = dc
         result["mechanics"]["attribute"] = attribute
+        if target_ac is not None:
+            result["mechanics"]["target_ac"] = target_ac
+        else:
+            result["mechanics"]["dc"] = dc
+
+    # --- Ép cứng damage đã roll bằng code — không tin số HP model tự bịa cho
+    # attack/hazard. Model chỉ còn quyền quyết magnitude cho các thay đổi HP
+    # KHÔNG liên quan combat (vd uống thuốc, nghỉ ngơi).
+    if damage or contest_type in ("attack", "hazard"):
+        result["mechanics"].setdefault("changes", {})
+        result["mechanics"].setdefault("entities", [])
+        if damage and damage["target"] == "entity":
+            result["mechanics"]["changes"]["hp"] = 0
+            ents = result["mechanics"]["entities"]
+            target_entry = next(
+                (e for e in ents if isinstance(e, dict)
+                 and (e.get("key") or "").strip().lower() == damage["target_key"]),
+                None,
+            )
+            if target_entry is None:
+                target_entry = {"key": damage["target_key"]}
+                ents.append(target_entry)
+            target_entry["hp_change"] = -damage["total"]
+        elif damage and damage["target"] == "player":
+            result["mechanics"]["changes"]["hp"] = -damage["total"]
+        elif not damage and contest_type in ("attack", "hazard") and not forced_fail:
+            # attack trượt, hoặc hazard né thành công -> không gây sát thương ở đâu cả
+            result["mechanics"]["changes"]["hp"] = 0
 
     if "changes" in result["mechanics"]:
         changes = result["mechanics"]["changes"]
@@ -947,12 +1084,32 @@ async def chat(data: dict):
         # --- RAG: entity/loot xử lý TRƯỚC khi apply items_added, vì cần
         # ledger loot mới nhất để validate ---
         conn2 = get_conn()
+        pre_turn_alive_keys = {(e.get("key") or "").strip().lower() for e in active_entities}
         entities.apply_entity_changes(
             conn2, char["id"], result["mechanics"].get("entities"), turn_number
         )
         entities.register_loot_drops(
             conn2, char["id"], result["mechanics"].get("loot_dropped"), turn_number
         )
+
+        # --- Thưởng XP/gold khi quái VỪA chuyển sang chết TRONG LƯỢT NÀY (chỉ
+        # xét những key đã sống trước lượt này, tránh cộng lại cho quái đã
+        # chết từ trước) — code tự cộng dồn, không phụ thuộc model có nhớ
+        # cộng xp hay không. ---
+        if pre_turn_alive_keys:
+            placeholders = ",".join("?" * len(pre_turn_alive_keys))
+            newly_dead = conn2.execute(
+                f"SELECT max_hp FROM entity WHERE character_id = ? AND status = 'dead' "
+                f"AND key IN ({placeholders})",
+                (char["id"], *pre_turn_alive_keys),
+            ).fetchall()
+            if newly_dead:
+                rewards = [_monster_kill_reward(row["max_hp"]) for row in newly_dead]
+                total_xp = sum(r["xp"] for r in rewards)
+                total_gold = sum(r["gold"] for r in rewards)
+                changes["xp"] = safe_int(changes.get("xp", 0)) + total_xp
+                changes["gold"] = safe_int(changes.get("gold", 0)) + total_gold
+                print(f"[DEBUG] {len(newly_dead)} quái chết lượt này -> +{total_xp} xp, +{total_gold} gold (code roll)")
         items_added = changes.get("items_added") or []
         validated_items, unverified = entities.validate_items_added(conn2, char["id"], items_added)
         changes["items_added"] = validated_items
