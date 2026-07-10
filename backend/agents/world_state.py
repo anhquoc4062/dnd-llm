@@ -18,7 +18,8 @@ import json
 import os
 import random
 
-DEBUG_STATE_PATH = os.path.join(os.path.dirname(__file__), "world_state.json")
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEBUG_STATE_PATH = os.path.join(_BACKEND_DIR, "game-data", "world_state.json")
 
 TIME_PERIODS = [
     ("Dawn", "Bình minh vừa ló dạng, ánh sáng còn yếu và lành lạnh."),

@@ -52,7 +52,8 @@ BIBLE_OPTIONS = {"num_ctx": 8192, "num_predict": 5500, "temperature": 0.9}
 # File lưu Campaign Bible ra ngoài (không chỉ nằm trong cột DB) — game này
 # chỉ có 1 save-slot (xem main.py: DELETE FROM character trước khi tạo mới),
 # nên dùng 1 đường dẫn cố định, ghi đè mỗi lần tạo nhân vật mới.
-CAMPAIGN_SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "campaign_saves")
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CAMPAIGN_SAVE_DIR = os.path.join(_BACKEND_DIR, "game-data", "campaign_saves")
 CAMPAIGN_SAVE_PATH = os.path.join(CAMPAIGN_SAVE_DIR, "current_campaign.json")
 
 

@@ -10,7 +10,8 @@ turn như lore/entities/world_state.
 import json
 import os
 
-_DATA_PATH = os.path.join(os.path.dirname(__file__), "lore_data", "race_class_reactions.json")
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DATA_PATH = os.path.join(_BACKEND_DIR, "game-data", "lore_data", "race_class_reactions.json")
 _DATA_CACHE = None
 
 

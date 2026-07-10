@@ -454,12 +454,84 @@ function renderDmTurn(data) {
   return div;
 }
 
+/* ---------------------------- Trợ lý ngoài-truyện ---------------------------- */
+
+let assistantAsking = false;
+
+function addAssistantMessage(kind, text){
+  const container = byId('assistant-messages');
+  const div = document.createElement('div');
+  div.className = 'a-msg ' + kind;
+  div.textContent = text;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+  return div;
+}
+
+function toggleAssistantPanel(forceOpen){
+  const panel = byId('assistant-panel');
+  const open = forceOpen !== undefined ? forceOpen : !panel.classList.contains('open');
+  panel.classList.toggle('open', open);
+  if (open) byId('assistant-input').focus();
+}
+
+async function askAssistant(){
+  const input = byId('assistant-input');
+  const question = input.value.trim();
+  if (!question || assistantAsking) return;
+  input.value = '';
+  assistantAsking = true;
+  byId('assistant-send-btn').disabled = true;
+
+  addAssistantMessage('user', question);
+  const loadingEl = addAssistantMessage('loading', 'Đang tra cứu…');
+
+  try {
+    const res = await fetch('/assistant_ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question }),
+    });
+    const data = await res.json();
+    loadingEl.remove();
+    addAssistantMessage('answer', data.error || data.answer || 'Không có phản hồi.');
+  } catch (e) {
+    console.error('Lỗi khi hỏi trợ lý:', e);
+    loadingEl.remove();
+    addAssistantMessage('answer', '⚠️ Không thể kết nối tới trợ lý.');
+  } finally {
+    assistantAsking = false;
+    byId('assistant-send-btn').disabled = false;
+  }
+}
+
+function initAssistant(){
+  byId('assistant-toggle').addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleAssistantPanel();
+  });
+  byId('assistant-close').addEventListener('click', () => toggleAssistantPanel(false));
+  byId('assistant-send-btn').addEventListener('click', askAssistant);
+  byId('assistant-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') askAssistant();
+  });
+
+  // Click ra ngoài panel (và ngoài nút toggle) -> tự đóng.
+  document.addEventListener('click', (e) => {
+    const panel = byId('assistant-panel');
+    if (!panel.classList.contains('open')) return;
+    if (panel.contains(e.target)) return;
+    toggleAssistantPanel(false);
+  });
+}
+
 async function init(){
   const char = await loadCharacter();
 
   byId('custom-action').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') sendCustomAction();
   });
+  initAssistant();
 
   if (char){
     startStory();

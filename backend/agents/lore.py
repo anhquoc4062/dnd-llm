@@ -27,7 +27,8 @@ import os
 import random
 import re
 
-_LORE_DIR = os.path.join(os.path.dirname(__file__), "lore_data", "regions")
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_LORE_DIR = os.path.join(_BACKEND_DIR, "game-data", "lore_data", "regions")
 _LORE_CACHE = None
 
 
