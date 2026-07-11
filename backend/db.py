@@ -71,13 +71,19 @@ def init_db():
     # Cho phép nâng cấp DB cũ (được tạo trước khi có race_en/character_class_en)
     # mà không cần xoá file game.db thủ công.
     existing_cols = {row["name"] for row in c.execute("PRAGMA table_info(character)")}
-    int_cols_default_0 = ("turns_since_event", "weather_since_turn", "current_turn", "summarized_up_to_turn", "campaign_milestone_index", "milestone_advanced_turn")
+    int_cols_default_0 = (
+        "turns_since_event", "weather_since_turn", "current_turn", "summarized_up_to_turn",
+        "campaign_milestone_index", "milestone_advanced_turn",
+        "campaign_act_index", "campaign_milestone_number",
+    )
     for col in ("race_en", "character_class_en", "turns_since_event", "region", "npc_pool",
                 "last_result", "weather", "weather_since_turn", "current_turn",
                 "history_summary", "summarized_up_to_turn", "campaign_theme", "campaign_data",
                 "campaign_milestone_index", "pre_turn_snapshot", "milestone_advanced_turn",
                 "pending_action", "last_turn_resolution",
-                "context_kind", "context_name", "context_desc", "context_image_path"):
+                "context_kind", "context_name", "context_desc", "context_image_path",
+                "campaign_act_index", "campaign_milestone_number", "current_milestone",
+                "story_state", "setup_stage", "setup_error"):
         if col not in existing_cols:
             if col in int_cols_default_0:
                 c.execute(f"ALTER TABLE character ADD COLUMN {col} INTEGER DEFAULT 0")
@@ -151,6 +157,29 @@ def _load_campaign_bible(char) -> dict | None:
         except (TypeError, json.JSONDecodeError):
             return None
     return None
+
+
+def save_current_milestone(char_id: int, milestone: dict):
+    """Milestone hiện tại (khác Campaign Bible — đổi liên tục mỗi khi hoàn
+    thành 1 cái, không tĩnh như bible) — lưu thẳng vào cột DB (JSON), không
+    cần file riêng."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE character SET current_milestone = ? WHERE id = ?",
+        (json.dumps(milestone, ensure_ascii=False), char_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_current_milestone(char) -> dict | None:
+    raw = char["current_milestone"] if "current_milestone" in char.keys() else None
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return None
 
 
 def _item_matches(item, name):

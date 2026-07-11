@@ -567,6 +567,7 @@ li.cooldown {
   box-shadow: 0 0 0 1px rgba(202,164,86,0.06), 0 20px 40px rgba(0,0,0,0.35);
   max-height: calc(100vh - 48px);
   overflow-y: auto;
+  height: fit-content;
 }
 
 .context-image-wrap{

@@ -529,15 +529,86 @@ html, body{
 select.input{ cursor: pointer; }
 select.input:disabled{ opacity: 0.6; cursor: not-allowed; }
 textarea.input{ resize: vertical; font-family: var(--font-body); line-height: 1.5; }
-.campaign-chosen{
-  font-size: 14px;
-  color: var(--parchment-dim);
-  border: 1px solid var(--line);
-  background: rgba(202,164,86,0.06);
-  border-radius: 6px;
-  padding: 10px 12px;
+/* ---------------------------- Modal tiến trình tạo campaign ---------------------------- */
+
+.setup-modal-overlay{
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(8,6,4,0.78);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
 }
-.campaign-chosen strong{ color: var(--gold); }
+.setup-modal-overlay.hidden{ display: none; }
+
+.setup-modal{
+  width: 100%; max-width: 420px;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 28px;
+  box-shadow: 0 0 0 1px rgba(202,164,86,0.06), 0 20px 60px rgba(0,0,0,0.5);
+  text-align: center;
+}
+
+.setup-modal-title{
+  font-family: var(--font-display);
+  font-size: 20px;
+  color: var(--gold-bright);
+  margin: 0 0 22px;
+}
+
+.setup-steps{
+  list-style: none;
+  margin: 0 0 18px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  text-align: left;
+}
+.setup-step{
+  font-size: 14px;
+  color: var(--muted);
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  position: relative;
+  transition: color .2s ease, border-color .2s ease, background .2s ease;
+}
+.setup-step::before{
+  content: '○';
+  margin-right: 8px;
+  font-family: var(--font-mono);
+}
+.setup-step.active{
+  color: var(--gold-bright);
+  border-color: var(--gold);
+  background: rgba(202,164,86,0.08);
+}
+.setup-step.active::before{
+  content: '◐';
+  animation: setup-step-spin 1s linear infinite;
+  display: inline-block;
+}
+.setup-step.done{
+  color: var(--sage-bright);
+  border-color: rgba(122,154,99,0.4);
+  background: rgba(122,154,99,0.06);
+}
+.setup-step.done::before{ content: '●'; color: var(--sage-bright); }
+
+@keyframes setup-step-spin{
+  to{ transform: rotate(360deg); }
+}
+
+.setup-error{
+  font-size: 13px;
+  color: var(--ember-bright);
+  margin: 0 0 14px;
+}
+.setup-error.hidden{ display: none; }
+
+#setup-retry-btn.hidden{ display: none; }
 
 @keyframes shake{
   10%,90%{ transform: translateX(-1px); }

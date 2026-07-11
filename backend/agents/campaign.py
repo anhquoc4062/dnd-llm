@@ -1,15 +1,30 @@
 """
-campaign.py — Sinh "Campaign Bible": tài liệu tham chiếu DUY NHẤT (single
-source of truth) mà AI DM (model nhỏ, ~14B, không có trí nhớ nào ngoài những
-gì được nhét vào context mỗi lượt) dựa vào để dẫn dắt toàn bộ ván chơi solo
-dài ~50-80 lượt, thay vì bịa tùy hứng từng turn rồi dần lạc đề/đi vòng vòng.
+campaign.py — Sinh "Campaign Bible": tài liệu tham chiếu CỐ ĐỊNH (canon) mà AI
+DM (model nhỏ, ~14B, không có trí nhớ nào ngoài những gì được nhét vào context
+mỗi lượt) dựa vào để dẫn dắt toàn bộ ván chơi solo, thay vì bịa tùy hứng từng
+turn rồi dần lạc đề/đi vòng vòng.
+
+KIẾN TRÚC 2 TẦNG (Bible cố định + Milestone sinh dần — xem agents/milestone.py):
+- Bible chỉ chứa những gì mà NẾU MẤT ĐI sẽ làm hỏng cốt truyện chính: thế
+  giới/timeline, main antagonist, key NPCs, quái/vật phẩm quan trọng, 3 act
+  (mỗi act có purpose/entry/exit condition), story_beats (các "điểm cốt truyện
+  bắt buộc" phải xảy ra trong từng act — xem field "story_beats" bên dưới),
+  các ending khả dĩ. Sinh 1 LẦN DUY NHẤT lúc tạo campaign, không đổi trong
+  suốt ván chơi.
+- Milestone (module milestone.py) sinh TỪNG CÁI MỘT, dựa trên Bible + story
+  state thật (người chơi đã làm gì), disposable — NPC/quái/location của 1
+  milestone có thể biến mất vĩnh viễn sau khi qua, không cần nhồi vào Bible.
+  story_beats là mảnh ghép nối Bible với Milestone: Bible cố định CÁI GÌ phải
+  xảy ra trong act nào, Milestone Designer tự do sáng tạo CÁCH NÀO để nó xảy
+  ra (xem milestone._build_milestone_prompt) — vừa giữ campaign không lạc đề,
+  vừa không cứng nhắc như kịch bản viết sẵn.
 
 Người chơi chỉ thấy đúng 1 câu "theme" (hook, hiển thị lúc tạo nhân vật) —
 toàn bộ phần còn lại bị giấu khỏi UI, chỉ được nhét vào system prompt cho DM
 đọc (xem format_campaign_context). Campaign Bible được lưu ra 1 FILE JSON
-riêng (backend/campaign_saves/current_campaign.json — xem save/load bên
-dưới) thay vì chỉ nằm trong 1 cột TEXT của SQLite, để dễ mở lên xem/theo dõi
-lúc dev/debug.
+riêng (backend/game-data/campaign_saves/current_campaign.json — xem save/load
+bên dưới) thay vì chỉ nằm trong 1 cột TEXT của SQLite, để dễ mở lên xem/theo
+dõi lúc dev/debug.
 
 Có 3 điểm vào:
 - generate_campaign_hooks(): AI chỉ bịa 5 câu "theme" (hook) ngắn, mỗi câu một
@@ -22,9 +37,13 @@ Có 3 điểm vào:
 
 generate_campaign_hooks() tắt "think" để lấy tốc độ (chỉ sinh vài câu ngắn).
 Cả 2 hàm expand đều bật "think" — model được yêu cầu tự SELF-CHECK (tính nhất
-quán timeline, động cơ NPC, thứ tự tiết lộ bí mật, pacing) trong lúc "suy
-nghĩ" rồi tự sửa TRƯỚC KHI xuất JSON cuối, thay vì chỉ viết 1 lần và hy vọng
-đúng — xem _build_campaign_bible_prompt().
+quán timeline, động cơ NPC, pacing 3 act) trong lúc "suy nghĩ" rồi tự sửa
+TRƯỚC KHI xuất JSON cuối, thay vì chỉ viết 1 lần và hy vọng đúng — xem
+_build_campaign_bible_prompt().
+
+LƯU Ý: cả 2 hàm expand đều gọi ollama.chat() ĐỒNG BỘ (blocking) — nơi gọi
+(main.py orchestrator lúc tạo nhân vật) PHẢI chạy qua run_in_executor, không
+được await trực tiếp trong 1 coroutine, nếu không sẽ chặn cả event loop.
 """
 
 import json
@@ -33,6 +52,8 @@ import re
 
 import ollama
 
+from . import text_utils
+
 CAMPAIGN_MODEL = "qwen3:14b"
 SEED_COUNT = 5
 
@@ -40,14 +61,11 @@ SEED_COUNT = 5
 # không cần suy luận sâu cho việc bịa 1 câu hook.
 HOOKS_OPTIONS = {"num_ctx": 4096, "num_predict": 1200, "temperature": 0.95}
 
-# Campaign Bible có schema lớn hơn hẳn seed cũ (milestones/secrets/factions/
-# npcs chi tiết/locations/boss plan_stages...) -> cần num_predict lớn hơn để
-# chứa CẢ phần "thinking" (self-check, think=True) lẫn JSON cuối cùng mà
-# không bị cắt ngang giữa chừng. Vẫn phải giữ vừa phải: máy chạy ollama ở đây
-# chủ yếu CPU-bound (qwen3:14b ~84% CPU/16% GPU theo `ollama ps`), num_predict
-# 9000 + num_ctx 16384 từng khiến 1 lần generate mất >10 phút — hạ xuống mức
-# này để vẫn đủ chỗ cho schema lớn mà không quá chậm để dùng thực tế.
-BIBLE_OPTIONS = {"num_ctx": 8192, "num_predict": 5500, "temperature": 0.9}
+# Campaign Bible giờ GỌN hơn bản cũ (bỏ story_milestones/secrets/revelation_
+# order — những thứ đó chuyển sang milestone.py sinh dần), nhưng vẫn đủ lớn
+# (world/characters/content/acts/endings) để cần ngân sách rộng rãi cho cả
+# phần "thinking" (self-check, think=True) lẫn JSON cuối cùng.
+BIBLE_OPTIONS = {"num_ctx": 8192, "num_predict": 4500, "temperature": 0.9}
 
 # File lưu Campaign Bible ra ngoài (không chỉ nằm trong cột DB) — game này
 # chỉ có 1 save-slot (xem main.py: DELETE FROM character trước khi tạo mới),
@@ -58,99 +76,97 @@ CAMPAIGN_SAVE_PATH = os.path.join(CAMPAIGN_SAVE_DIR, "current_campaign.json")
 
 
 _DEFAULT_BIBLE = {
-    "theme": "Bạn tỉnh dậy giữa tàn tích của một buổi lễ đã thất bại, không nhớ nổi mình đã hứa điều gì với thứ đang chờ dưới lòng đất.",
-    "premise": "The character was meant to be the vessel for an interrupted binding ritual. They survived with no memory of that night, but the ritual's true architect — someone they once trusted — is still working to finish what was started.",
-    "tone": "grim, paranoid, quietly desperate",
-    "setting": {
-        "name": "Hollow's Reach",
-        "description": "A fog-bound trade town built atop a sealed ritual site, where the old faith never fully died and half the town still leaves offerings at a shrine no one admits to visiting.",
+    "campaign": {
+        "title": "The Hollow Reach",
+        "theme": "Bạn tỉnh dậy giữa tàn tích của một buổi lễ đã thất bại, không nhớ nổi mình đã hứa điều gì với thứ đang chờ dưới lòng đất.",
+        "genre": "dark fantasy mystery",
+        "tone": "grim, paranoid, quietly desperate",
+        "estimated_length": {"target_milestones": 10},
     },
-    "starting_location": {
-        "name": "The Sealed Shrine",
-        "description": "The half-collapsed ritual site where the character wakes, ash and broken chalk circles underfoot, the air still faintly metallic with old magic.",
-        "opening_hook": "A single scorched token bearing the character's own name lies within arm's reach — proof someone knew they would be here before they ever arrived.",
-    },
-    "main_goal": "Uncover what ritual was interrupted, and stop it from completing before it's too late.",
-    "plot_twist": "The one orchestrating the ritual's completion is someone the character has trusted since before the story began — their survival that night was not luck, it was arranged.",
-    "moral_dilemma": "Expose the orchestrator publicly (justice, but the town descends into chaos and witch-hunts) or handle it quietly (order preserved, but the character becomes complicit in the cover-up).",
-    "story_milestones": [
-        {"id": "m1", "title": "Wake with no memory", "description": "Character wakes at the ritual site with fragmentary memories and a mark they can't explain.", "npc_involved": None},
-        {"id": "m2", "title": "Meet the informant", "description": "Character finds someone with pieces of the truth, willing to trade information for a favor.", "npc_involved": "unknown_informant"},
-        {"id": "m3", "title": "Identify the ritual's true purpose", "description": "Character learns the ritual was meant to bind something, not summon it, and why they were chosen as vessel.", "npc_involved": None},
-        {"id": "m4", "title": "First confrontation with the cult", "description": "The cultists notice the character asking questions and move against them directly.", "npc_involved": None},
-        {"id": "m5", "title": "Discover the orchestrator's identity", "description": "Character finds undeniable proof of who arranged the ritual — someone close to them.", "npc_involved": "unknown_informant"},
-        {"id": "m6", "title": "The orchestrator's counter-move", "description": "The orchestrator acts to silence the character or complete the ritual early.", "npc_involved": None},
-        {"id": "m7", "title": "Final confrontation", "description": "Character faces the orchestrator and the near-completed ritual, forcing the moral dilemma.", "npc_involved": None},
-    ],
-    "secrets": [
-        {"id": "s1", "description": "The character bears a ritual mark that reacts to cult symbols.", "reveal_tier": "public"},
-        {"id": "s2", "description": "The ritual was meant to BIND an ancient entity, not summon it — the character's survival was the failure state, not an accident.", "reveal_tier": "mid_game"},
-        {"id": "s3", "description": "The informant already knows the orchestrator's identity but is too afraid to say it outright.", "reveal_tier": "late_game"},
-        {"id": "s4", "description": "The orchestrator is someone the character has trusted since before the story began.", "reveal_tier": "finale"},
-    ],
-    "revelation_order": {"public": ["s1"], "mid_game": ["s2"], "late_game": ["s3"], "finale": ["s4"]},
-    "factions": [
-        {"id": "f1", "name": "The Hollow Circle", "goal": "Complete the interrupted ritual by any means.", "methods": "Infiltration, blackmail, ritual murder disguised as accidents.", "relationship_to_player": "Hostile once the character starts investigating."},
-    ],
-    "npcs": [
-        {
-            "key": "unknown_informant", "name": "Unknown Informant", "gender": "male", "role": "ally",
-            "desc": "A cautious contact with fragments of the truth.",
-            "personality": "Speaks only in half-truths and riddles, terrified of being overheard.",
-            "appearance": "Gaunt, cloaked figure with ink-stained fingers and a nervous twitch.",
-            "motivation": "Wants the ritual stopped but is too afraid to act directly.",
-            "trusts": "No one fully, but leans on the character out of shared danger.",
-            "distrusts": "Anyone connected to the Hollow Circle, including old friends.",
-            "secret": "Knows the orchestrator's identity but hasn't said it outright.",
-            "autonomous_behavior": "Gathers scraps of information and hides them in dead drops, growing more paranoid and harder to reach as the cult closes in.",
-        },
-    ],
-    "key_locations": [
-        {"name": "The Sealed Shrine", "description": "The ritual site itself, half-collapsed and still watched by the cult.", "npc_keys_present": []},
-        {"name": "The Informant's Attic", "description": "A cramped hideout above a shuttered shop.", "npc_keys_present": ["unknown_informant"]},
-    ],
-    "monsters": [
-        {
-            "name": "Cultist", "species": "Corrupted human",
-            "appearance": "Robed figure with ritual scars and a hollow, unblinking stare.",
-            "moveset": "Sacrificial dagger stabs, chants that inflict fear at range.",
-            "behavior": "Fanatical, fights to the death, flees only to warn others.",
-        },
-        {
-            "name": "Shadow Beast", "species": "Aberration",
-            "appearance": "A hound-sized mass of writhing black smoke with glowing red eyes.",
-            "moveset": "Lunging bite, brief invisibility, claw swipes that drain vigor.",
-            "behavior": "Stalks silently before ambushing; retreats into darkness when badly hurt.",
-        },
-        {
-            "name": "Corrupted Guardian", "species": "Animated construct",
-            "appearance": "A cracked stone statue fused with pulsing dark veins of corruption.",
-            "moveset": "Slow heavy slams, ground-shaking stomps, brief defensive stone-skin.",
-            "behavior": "Relentless and unthinking, never flees, guards a fixed location.",
-        },
-    ],
-    "boss": {
-        "name": "The Awakened One", "desc": "The ancient evil at the heart of the plot.",
-        "appearance": "A towering, half-formed silhouette of shifting shadow and cracked bone.",
-        "moveset": "Reality-warping strikes, summons minor shadow beasts, a devastating area pulse at low health.",
-        "behavior": "Calm and taunting at first, grows increasingly violent and desperate as it weakens.",
-        "ultimate_goal": "Fully manifest in the mortal world by completing the interrupted ritual.",
-        "plan_stages": [
-            {"stage": 1, "title": "Recover the lost vessel", "description": "Track down the character, the ritual's original intended vessel."},
-            {"stage": 2, "title": "Reassemble the ritual circle", "description": "The cult repairs the damaged shrine and gathers scattered relics."},
-            {"stage": 3, "title": "Silence witnesses", "description": "Eliminate or discredit anyone who could expose the ritual, including the informant."},
-            {"stage": 4, "title": "Complete the binding", "description": "Force the ritual to completion, with or without the character's consent."},
+    "world": {
+        "overview": "A fog-bound trade town built atop a sealed ritual site, where the old faith never fully died.",
+        "timeline": "The ritual was interrupted years ago; the cult has spent that time quietly rebuilding toward finishing it.",
+        "major_locations": [
+            {"name": "Hollow's Reach", "description": "A fog-bound trade town built atop a sealed ritual site."},
+            {"name": "The Sealed Shrine", "description": "The half-collapsed ritual site itself, still watched by the cult."},
+        ],
+        "major_factions": [
+            {"name": "The Hollow Circle", "goal": "Complete the interrupted ritual by any means.", "methods": "Infiltration, blackmail, ritual murder disguised as accidents.", "relationship_to_player": "Hostile once the character starts investigating."},
         ],
     },
-    "failure_state": {
-        "idle_turn_threshold": 5,
-        "description": "The Hollow Circle advances to the next plan_stage regardless — a location the player knows falls under cult control, or the informant goes missing, forcing the player back into the plot with higher stakes.",
+    "story": {
+        "main_goal": "Uncover what ritual was interrupted, and stop it from completing before it's too late.",
+        "main_conflict": "The character was meant to be the ritual's vessel and must stop whoever orchestrated it before it finishes what it started.",
+        "hidden_truths": [
+            {"id": "t1", "description": "The ritual was meant to BIND an ancient entity, not summon it — the character's survival was the failure state, not an accident."},
+            {"id": "t2", "description": "The orchestrator is someone the character has trusted since before the story began."},
+        ],
+        "main_plot": "The character survived a ritual meant to bind an ancient evil, and must uncover who orchestrated it before they finish the job.",
+        "narrative_constraints": [
+            "The orchestrator's identity must never be confirmed before Act 3.",
+            "The character cannot permanently leave Hollow's Reach before the ritual threat is resolved.",
+        ],
     },
-    "pacing_guidance": "Milestones 1-2 in turns 1-15 (setup, establish the mystery); milestones 3-4 in turns 16-40 (investigation, first real danger); milestones 5-6 in turns 41-65 (escalation, the twist lands); milestone 7 (finale) in the last 10-15 turns.",
-    "dm_directives": {
-        "never_reveal": ["The orchestrator's identity before milestone 5", "The true purpose of the ritual (binding, not summoning) before milestone 3"],
-        "npc_encounter_rule": "Proactively place NPCs into scenes at their key_locations — do not make the player hunt blindly for someone to talk to.",
+    "characters": {
+        "main_antagonist": {
+            "name": "The Awakened One", "desc": "The ancient evil at the heart of the plot.",
+            "appearance": "A towering, half-formed silhouette of shifting shadow and cracked bone.",
+            "visual_prompt": "towering shadow entity, cracked bone fragments, shifting silhouette, ominous glow",
+            "moveset": "Reality-warping strikes, summons minor shadow beasts, a devastating area pulse at low health.",
+            "behavior": "Calm and taunting at first, grows increasingly violent and desperate as it weakens.",
+            "ultimate_goal": "Fully manifest in the mortal world by completing the interrupted ritual.",
+            "plan_stages": [
+                {"stage": 1, "title": "Recover the lost vessel", "description": "Track down the character, the ritual's original intended vessel."},
+                {"stage": 2, "title": "Reassemble the ritual circle", "description": "The cult repairs the damaged shrine and gathers scattered relics."},
+                {"stage": 3, "title": "Silence witnesses", "description": "Eliminate or discredit anyone who could expose the ritual."},
+                {"stage": 4, "title": "Complete the binding", "description": "Force the ritual to completion, with or without the character's consent."},
+            ],
+        },
+        "key_npcs": [
+            {
+                "key": "unknown_informant", "name": "Unknown Informant", "gender": "male", "role": "ally",
+                "motivation": "Wants the ritual stopped but is too afraid to act directly.",
+                "personality": "Speaks only in half-truths and riddles, terrified of being overheard.",
+                "relationships": "Distrusts anyone connected to the Hollow Circle, leans on the character out of shared danger.",
+                "secrets": "Knows the orchestrator's identity but hasn't said it outright.",
+                "appearance": "Gaunt, cloaked figure with ink-stained fingers and a nervous twitch.",
+                "visual_prompt": "gaunt cloaked man, ink-stained fingers, nervous expression, dim candlelight",
+            },
+        ],
     },
+    "content": {
+        "major_monsters": [
+            {
+                "name": "Shadow Wraith", "species": "Aberration",
+                "appearance": "A hound-sized mass of writhing black smoke with glowing red eyes.",
+                "visual_prompt": "writhing black smoke creature, glowing red eyes, hound-sized, aberration",
+                "moveset": "Lunging bite, brief invisibility, claw swipes that drain vigor.",
+                "behavior": "Stalks silently before ambushing; retreats into darkness when badly hurt.",
+            },
+        ],
+        "important_items": [
+            {
+                "name": "Scorched Ritual Token",
+                "description": "Bears the character's own name — proof someone knew they would be here before they ever arrived.",
+                "significance": "Key evidence tying the character to the ritual's true purpose.",
+            },
+        ],
+    },
+    "acts": [
+        {"act": 1, "purpose": "Establish the mystery and the character's stake in it.", "entry_condition": "Campaign start.", "exit_condition": "The character learns the ritual was meant to bind something, not summon it."},
+        {"act": 2, "purpose": "Investigate the cult and identify the orchestrator.", "entry_condition": "Act 1 exit condition met.", "exit_condition": "The character has undeniable proof of the orchestrator's identity."},
+        {"act": 3, "purpose": "Confront the orchestrator and resolve the ritual threat.", "entry_condition": "Act 2 exit condition met.", "exit_condition": "The ritual is stopped or completed, and the moral dilemma is resolved."},
+    ],
+    "possible_endings": [
+        {"name": "Public Exposure", "description": "The character exposes the orchestrator publicly — justice, but the town descends into chaos and witch-hunts.", "trigger_condition": "The character prioritized public truth over order throughout Act 3."},
+        {"name": "Quiet Containment", "description": "The character handles it quietly — order preserved, but they become complicit in the cover-up.", "trigger_condition": "The character prioritized stability/secrecy throughout Act 3."},
+    ],
+    "story_beats": [
+        {"id": "sb1", "act": 1, "description": "The character learns the ritual was meant to bind something, not summon it."},
+        {"id": "sb2", "act": 1, "description": "The character finds physical proof they were the ritual's intended vessel."},
+        {"id": "sb3", "act": 2, "description": "The character uncovers evidence pointing toward the orchestrator's identity."},
+        {"id": "sb4", "act": 3, "description": "The character confronts the orchestrator with the truth."},
+    ],
 }
 
 
@@ -171,245 +187,217 @@ def _slugify(text, fallback):
     return text or fallback
 
 
+def _s(d, key, default=""):
+    return str(d.get(key) or default).strip() if isinstance(d, dict) else default
+
+
 def _parse_campaign_json(reply: str):
     try:
         clean = reply.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
+        parsed = json.loads(clean)
     except json.JSONDecodeError:
         return None
+    # Hậu kỳ ngay từ nguồn (Bible chỉ sinh 1 lần, sai là sai suốt campaign) —
+    # xem agents/text_utils.py. Vô hại với field tiếng Anh, chỉ cắt được gì
+    # có ký tự CJK thật.
+    return text_utils.strip_cjk_deep(parsed)
 
 
 def _normalize_bible(obj: dict) -> dict:
-    """Đảm bảo đủ field/đúng kiểu cho Campaign Bible — schema này lớn, model
-    có thể bỏ sót/sai bất kỳ field nào; field nào thiếu/hỏng rơi về ĐÚNG phần
+    """Đảm bảo đủ field/đúng kiểu cho Campaign Bible — schema lớn, model có
+    thể bỏ sót/sai bất kỳ field nào; field nào thiếu/hỏng rơi về ĐÚNG phần
     tương ứng của _DEFAULT_BIBLE (không rơi về default nguyên khối), để 1 lỗi
     nhỏ ở 1 field không xoá sạch phần model đã làm đúng ở các field khác."""
     if not isinstance(obj, dict):
         obj = {}
 
-    def s(d, key, default=""):
-        return str(d.get(key) or default).strip() if isinstance(d, dict) else default
-
-    theme = s(obj, "theme", _DEFAULT_BIBLE["theme"])
-    premise = s(obj, "premise", _DEFAULT_BIBLE["premise"])
-    tone = s(obj, "tone", _DEFAULT_BIBLE["tone"])
-
-    setting_raw = obj.get("setting")
-    if isinstance(setting_raw, dict) and setting_raw.get("name"):
-        setting = {"name": s(setting_raw, "name"), "description": s(setting_raw, "description")}
-    else:
-        setting = dict(_DEFAULT_BIBLE["setting"])
-
-    start_raw = obj.get("starting_location")
-    if isinstance(start_raw, dict) and start_raw.get("name") and start_raw.get("opening_hook"):
-        starting_location = {
-            "name": s(start_raw, "name"),
-            "description": s(start_raw, "description"),
-            "opening_hook": s(start_raw, "opening_hook"),
+    # --- campaign ---
+    campaign_raw = obj.get("campaign")
+    if isinstance(campaign_raw, dict) and campaign_raw.get("theme"):
+        est_raw = campaign_raw.get("estimated_length")
+        target_ms = _safe_int(
+            est_raw.get("target_milestones") if isinstance(est_raw, dict) else est_raw,
+            _DEFAULT_BIBLE["campaign"]["estimated_length"]["target_milestones"],
+        )
+        target_ms = max(6, min(target_ms, 18))  # chặn số vô lý, giữ trong khung ~1-2h chơi
+        campaign_block = {
+            "title": _s(campaign_raw, "title", _DEFAULT_BIBLE["campaign"]["title"]),
+            "theme": _s(campaign_raw, "theme", _DEFAULT_BIBLE["campaign"]["theme"]),
+            "genre": _s(campaign_raw, "genre", _DEFAULT_BIBLE["campaign"]["genre"]),
+            "tone": _s(campaign_raw, "tone", _DEFAULT_BIBLE["campaign"]["tone"]),
+            "estimated_length": {"target_milestones": target_ms},
         }
     else:
-        starting_location = dict(_DEFAULT_BIBLE["starting_location"])
+        campaign_block = json.loads(json.dumps(_DEFAULT_BIBLE["campaign"]))
 
-    main_goal = s(obj, "main_goal", _DEFAULT_BIBLE["main_goal"])
-    plot_twist = s(obj, "plot_twist", _DEFAULT_BIBLE["plot_twist"])
-    moral_dilemma = s(obj, "moral_dilemma", _DEFAULT_BIBLE["moral_dilemma"])
+    # --- world ---
+    world_raw = obj.get("world")
+    if isinstance(world_raw, dict) and world_raw.get("overview"):
+        locs = []
+        for l in (world_raw.get("major_locations") or []):
+            if isinstance(l, dict) and l.get("name"):
+                locs.append({"name": _s(l, "name"), "description": _s(l, "description")})
+        if not locs:
+            locs = [dict(l) for l in _DEFAULT_BIBLE["world"]["major_locations"]]
 
-    milestones_raw = obj.get("story_milestones")
-    milestones = []
-    if isinstance(milestones_raw, list):
-        for i, m in enumerate(milestones_raw):
-            if isinstance(m, dict) and m.get("title"):
-                npc_involved = s(m, "npc_involved")
-                milestones.append({
-                    "id": _slugify(m.get("id") or m.get("title"), f"m{i + 1}"),
-                    "title": s(m, "title"),
-                    "description": s(m, "description"),
-                    "npc_involved": npc_involved or None,
-                })
-    if not milestones:
-        milestones = [dict(m) for m in _DEFAULT_BIBLE["story_milestones"]]
-
-    secrets_raw = obj.get("secrets")
-    secrets = []
-    valid_tiers = {"public", "mid_game", "late_game", "finale"}
-    if isinstance(secrets_raw, list):
-        for i, sec in enumerate(secrets_raw):
-            if isinstance(sec, dict) and sec.get("description"):
-                tier = s(sec, "reveal_tier", "mid_game").lower()
-                if tier not in valid_tiers:
-                    tier = "mid_game"
-                secrets.append({
-                    "id": _slugify(sec.get("id"), f"s{i + 1}"),
-                    "description": s(sec, "description"),
-                    "reveal_tier": tier,
-                })
-    if not secrets:
-        secrets = [dict(sec) for sec in _DEFAULT_BIBLE["secrets"]]
-
-    secret_ids = {sec["id"] for sec in secrets}
-    revelation_raw = obj.get("revelation_order")
-    revelation = {"public": [], "mid_game": [], "late_game": [], "finale": []}
-    if isinstance(revelation_raw, dict):
-        for tier in revelation:
-            ids = revelation_raw.get(tier)
-            if isinstance(ids, list):
-                revelation[tier] = [i for i in ids if i in secret_ids]
-    # Đảm bảo MỌI secret đều xuất hiện đâu đó trong revelation_order (theo
-    # đúng reveal_tier của nó) — phòng model khai báo secret nhưng quên liệt
-    # kê nó ra trong revelation_order, khiến DM không biết khi nào được tiết lộ.
-    already_placed = {i for ids in revelation.values() for i in ids}
-    for sec in secrets:
-        if sec["id"] not in already_placed:
-            revelation[sec["reveal_tier"]].append(sec["id"])
-
-    factions_raw = obj.get("factions")
-    factions = []
-    if isinstance(factions_raw, list):
-        for i, f in enumerate(factions_raw):
+        facs = []
+        for f in (world_raw.get("major_factions") or []):
             if isinstance(f, dict) and f.get("name"):
-                factions.append({
-                    "id": _slugify(f.get("id") or f.get("name"), f"f{i + 1}"),
-                    "name": s(f, "name"),
-                    "goal": s(f, "goal"),
-                    "methods": s(f, "methods"),
-                    "relationship_to_player": s(f, "relationship_to_player"),
+                facs.append({
+                    "name": _s(f, "name"), "goal": _s(f, "goal"),
+                    "methods": _s(f, "methods"), "relationship_to_player": _s(f, "relationship_to_player"),
                 })
-    if not factions:
-        factions = [dict(f) for f in _DEFAULT_BIBLE["factions"]]
+        if not facs:
+            facs = [dict(f) for f in _DEFAULT_BIBLE["world"]["major_factions"]]
 
-    npcs_raw = obj.get("npcs")
+        world_block = {
+            "overview": _s(world_raw, "overview"),
+            "timeline": _s(world_raw, "timeline"),
+            "major_locations": locs,
+            "major_factions": facs,
+        }
+    else:
+        world_block = json.loads(json.dumps(_DEFAULT_BIBLE["world"]))
+
+    # --- story ---
+    story_raw = obj.get("story")
+    if isinstance(story_raw, dict) and story_raw.get("main_goal"):
+        truths = []
+        for i, t in enumerate(story_raw.get("hidden_truths") or []):
+            if isinstance(t, dict) and t.get("description"):
+                truths.append({"id": _slugify(t.get("id"), f"t{i + 1}"), "description": _s(t, "description")})
+        if not truths:
+            truths = [dict(t) for t in _DEFAULT_BIBLE["story"]["hidden_truths"]]
+
+        constraints_raw = story_raw.get("narrative_constraints")
+        constraints = [str(x).strip() for x in constraints_raw if str(x).strip()] if isinstance(constraints_raw, list) else []
+        if not constraints:
+            constraints = list(_DEFAULT_BIBLE["story"]["narrative_constraints"])
+
+        story_block = {
+            "main_goal": _s(story_raw, "main_goal"),
+            "main_conflict": _s(story_raw, "main_conflict"),
+            "hidden_truths": truths,
+            "main_plot": _s(story_raw, "main_plot"),
+            "narrative_constraints": constraints,
+        }
+    else:
+        story_block = json.loads(json.dumps(_DEFAULT_BIBLE["story"]))
+
+    # --- characters ---
+    characters_raw = obj.get("characters")
+    antagonist_raw = characters_raw.get("main_antagonist") if isinstance(characters_raw, dict) else None
+    if isinstance(antagonist_raw, dict) and antagonist_raw.get("name"):
+        stages = []
+        for i, st in enumerate(antagonist_raw.get("plan_stages") or []):
+            if isinstance(st, dict) and st.get("title"):
+                stages.append({
+                    "stage": _safe_int(st.get("stage"), i + 1) or (i + 1),
+                    "title": _s(st, "title"), "description": _s(st, "description"),
+                })
+        if not stages:
+            stages = [dict(st) for st in _DEFAULT_BIBLE["characters"]["main_antagonist"]["plan_stages"]]
+        antagonist = {
+            "name": _s(antagonist_raw, "name"), "desc": _s(antagonist_raw, "desc"),
+            "appearance": _s(antagonist_raw, "appearance"), "visual_prompt": _s(antagonist_raw, "visual_prompt"),
+            "moveset": _s(antagonist_raw, "moveset"), "behavior": _s(antagonist_raw, "behavior"),
+            "ultimate_goal": _s(antagonist_raw, "ultimate_goal"), "plan_stages": stages,
+        }
+    else:
+        antagonist = json.loads(json.dumps(_DEFAULT_BIBLE["characters"]["main_antagonist"]))
+
+    npcs_raw = characters_raw.get("key_npcs") if isinstance(characters_raw, dict) else None
     npcs = []
     if isinstance(npcs_raw, list):
         for i, n in enumerate(npcs_raw):
             if isinstance(n, dict) and n.get("name"):
-                gender_raw = s(n, "gender").lower()
+                gender_raw = _s(n, "gender").lower()
                 npcs.append({
                     "key": _slugify(n.get("key") or n.get("name"), f"npc_{i + 1}"),
-                    "name": s(n, "name"),
+                    "name": _s(n, "name"),
                     "gender": gender_raw if gender_raw in ("male", "female") else "",
-                    "role": s(n, "role", "npc"),
-                    "desc": s(n, "desc"),
-                    "personality": s(n, "personality"),
-                    "appearance": s(n, "appearance"),
-                    "motivation": s(n, "motivation"),
-                    "trusts": s(n, "trusts"),
-                    "distrusts": s(n, "distrusts"),
-                    "secret": s(n, "secret"),
-                    "autonomous_behavior": s(n, "autonomous_behavior"),
+                    "role": _s(n, "role", "npc"),
+                    "motivation": _s(n, "motivation"),
+                    "personality": _s(n, "personality"),
+                    "relationships": _s(n, "relationships"),
+                    "secrets": _s(n, "secrets"),
+                    "appearance": _s(n, "appearance"),
+                    "visual_prompt": _s(n, "visual_prompt"),
                 })
     if not npcs:
-        npcs = [dict(n) for n in _DEFAULT_BIBLE["npcs"]]
+        npcs = [dict(n) for n in _DEFAULT_BIBLE["characters"]["key_npcs"]]
 
-    npc_keys = {n["key"] for n in npcs}
-    # Model hay điền npc_involved bằng placeholder string ("nil", "none",
-    # "null"...) thay vì JSON null thật, hoặc trỏ tới 1 key không tồn tại
-    # trong npcs -> nếu để lọt, DM sẽ đọc thấy "involves NPC: nil" như thể đó
-    # là 1 NPC thật. Validate lại: chỉ giữ nếu khớp đúng 1 key có thật.
-    for m in milestones:
-        if m["npc_involved"] and _slugify(m["npc_involved"], "") not in npc_keys and m["npc_involved"] not in npc_keys:
-            m["npc_involved"] = None
+    characters_block = {"main_antagonist": antagonist, "key_npcs": npcs}
 
-    locations_raw = obj.get("key_locations")
-    locations = []
-    if isinstance(locations_raw, list):
-        for l in locations_raw:
-            if isinstance(l, dict) and l.get("name"):
-                present = l.get("npc_keys_present")
-                present = [p for p in present if p in npc_keys] if isinstance(present, list) else []
-                locations.append({"name": s(l, "name"), "description": s(l, "description"), "npc_keys_present": present})
-    if not locations:
-        locations = [dict(l) for l in _DEFAULT_BIBLE["key_locations"]]
-    # starting_location PHẢI xuất hiện trong key_locations (DM cần thấy nó ở
-    # cả 2 chỗ: bản thân nó + trong danh sách địa điểm chung) — model đôi khi
-    # quên lặp lại, tự thêm vào nếu thiếu thay vì bắt DM tự suy luận.
-    if not any(l["name"].strip().lower() == starting_location["name"].strip().lower() for l in locations):
-        locations.insert(0, {
-            "name": starting_location["name"],
-            "description": starting_location["description"],
-            "npc_keys_present": [],
-        })
-
-    monsters_raw = obj.get("monsters")
+    # --- content ---
+    content_raw = obj.get("content")
     monsters = []
-    if isinstance(monsters_raw, list):
-        for m in monsters_raw:
+    items = []
+    if isinstance(content_raw, dict):
+        for m in (content_raw.get("major_monsters") or []):
             if isinstance(m, dict) and m.get("name"):
                 monsters.append({
-                    "name": s(m, "name"), "species": s(m, "species"),
-                    "appearance": s(m, "appearance"), "moveset": s(m, "moveset"),
-                    "behavior": s(m, "behavior"),
+                    "name": _s(m, "name"), "species": _s(m, "species"),
+                    "appearance": _s(m, "appearance"), "visual_prompt": _s(m, "visual_prompt"),
+                    "moveset": _s(m, "moveset"), "behavior": _s(m, "behavior"),
                 })
-            elif isinstance(m, str) and m.strip():
-                monsters.append({"name": m.strip(), "species": "", "appearance": "", "moveset": "", "behavior": ""})
+        for it in (content_raw.get("important_items") or []):
+            if isinstance(it, dict) and it.get("name"):
+                items.append({"name": _s(it, "name"), "description": _s(it, "description"), "significance": _s(it, "significance")})
     if not monsters:
-        monsters = [dict(m) for m in _DEFAULT_BIBLE["monsters"]]
+        monsters = [dict(m) for m in _DEFAULT_BIBLE["content"]["major_monsters"]]
+    if not items:
+        items = [dict(it) for it in _DEFAULT_BIBLE["content"]["important_items"]]
+    content_block = {"major_monsters": monsters, "important_items": items}
 
-    boss_raw = obj.get("boss")
-    if isinstance(boss_raw, dict) and boss_raw.get("name"):
-        stages_raw = boss_raw.get("plan_stages")
-        stages = []
-        if isinstance(stages_raw, list):
-            for i, st in enumerate(stages_raw):
-                if isinstance(st, dict) and st.get("title"):
-                    stages.append({
-                        "stage": _safe_int(st.get("stage"), i + 1) or (i + 1),
-                        "title": s(st, "title"),
-                        "description": s(st, "description"),
-                    })
-        if not stages:
-            stages = [dict(st) for st in _DEFAULT_BIBLE["boss"]["plan_stages"]]
-        boss = {
-            "name": s(boss_raw, "name"), "desc": s(boss_raw, "desc"),
-            "appearance": s(boss_raw, "appearance"), "moveset": s(boss_raw, "moveset"),
-            "behavior": s(boss_raw, "behavior"),
-            "ultimate_goal": s(boss_raw, "ultimate_goal"),
-            "plan_stages": stages,
-        }
-    else:
-        boss = json.loads(json.dumps(_DEFAULT_BIBLE["boss"]))
+    # --- acts (đúng 3, đánh số 1-3) ---
+    acts_raw = obj.get("acts")
+    acts = []
+    if isinstance(acts_raw, list):
+        for i, a in enumerate(acts_raw[:3]):
+            if isinstance(a, dict) and a.get("purpose"):
+                acts.append({
+                    "act": i + 1, "purpose": _s(a, "purpose"),
+                    "entry_condition": _s(a, "entry_condition"), "exit_condition": _s(a, "exit_condition"),
+                })
+    if len(acts) != 3:
+        acts = [dict(a) for a in _DEFAULT_BIBLE["acts"]]
 
-    failure_raw = obj.get("failure_state")
-    if isinstance(failure_raw, dict) and failure_raw.get("description"):
-        failure = {
-            "idle_turn_threshold": max(1, _safe_int(failure_raw.get("idle_turn_threshold"), 5)),
-            "description": s(failure_raw, "description"),
-        }
-    else:
-        failure = dict(_DEFAULT_BIBLE["failure_state"])
+    # --- possible_endings ---
+    endings_raw = obj.get("possible_endings")
+    endings = []
+    if isinstance(endings_raw, list):
+        for e in endings_raw:
+            if isinstance(e, dict) and e.get("name"):
+                endings.append({"name": _s(e, "name"), "description": _s(e, "description"), "trigger_condition": _s(e, "trigger_condition")})
+    if not endings:
+        endings = [dict(e) for e in _DEFAULT_BIBLE["possible_endings"]]
 
-    pacing_guidance = s(obj, "pacing_guidance", _DEFAULT_BIBLE["pacing_guidance"])
-
-    directives_raw = obj.get("dm_directives")
-    never_reveal, npc_encounter_rule = [], ""
-    if isinstance(directives_raw, dict):
-        nr = directives_raw.get("never_reveal")
-        never_reveal = [str(x).strip() for x in nr if str(x).strip()] if isinstance(nr, list) else []
-        npc_encounter_rule = s(directives_raw, "npc_encounter_rule")
-    if not never_reveal:
-        never_reveal = list(_DEFAULT_BIBLE["dm_directives"]["never_reveal"])
-    if not npc_encounter_rule:
-        npc_encounter_rule = _DEFAULT_BIBLE["dm_directives"]["npc_encounter_rule"]
+    # --- story_beats (mandatory plot points per act — links Bible to Milestone
+    # Generator: fixed WHAT, but the milestone designer stays free to invent
+    # HOW each beat actually plays out) ---
+    beats_raw = obj.get("story_beats")
+    beats = []
+    if isinstance(beats_raw, list):
+        for i, bt in enumerate(beats_raw):
+            if isinstance(bt, dict) and bt.get("description"):
+                beats.append({
+                    "id": _slugify(bt.get("id"), f"sb{i + 1}"),
+                    "act": max(1, min(_safe_int(bt.get("act"), 1), len(acts))),
+                    "description": _s(bt, "description"),
+                })
+    if not beats:
+        beats = [dict(bt) for bt in _DEFAULT_BIBLE["story_beats"]]
 
     return {
-        "theme": theme,
-        "premise": premise,
-        "tone": tone,
-        "setting": setting,
-        "starting_location": starting_location,
-        "main_goal": main_goal,
-        "plot_twist": plot_twist,
-        "moral_dilemma": moral_dilemma,
-        "story_milestones": milestones,
-        "secrets": secrets,
-        "revelation_order": revelation,
-        "factions": factions,
-        "npcs": npcs,
-        "key_locations": locations,
-        "monsters": monsters,
-        "boss": boss,
-        "failure_state": failure,
-        "pacing_guidance": pacing_guidance,
-        "dm_directives": {"never_reveal": never_reveal, "npc_encounter_rule": npc_encounter_rule},
+        "campaign": campaign_block,
+        "world": world_block,
+        "story": story_block,
+        "characters": characters_block,
+        "content": content_block,
+        "acts": acts,
+        "possible_endings": endings,
+        "story_beats": beats,
     }
 
 
@@ -511,7 +499,7 @@ def generate_campaign_hooks(model: str = None, options: dict = None) -> list:
 
     hooks = [str(h).strip() for h in hooks_raw[:SEED_COUNT] if str(h).strip()]
     while len(hooks) < SEED_COUNT:
-        hooks.append(_DEFAULT_BIBLE["theme"])
+        hooks.append(_DEFAULT_BIBLE["campaign"]["theme"])
     return hooks
 
 
@@ -532,24 +520,20 @@ Vietnamese). Distill it into ONE polished Vietnamese hook sentence for "theme" (
 replace it with something unrelated, but you may tidy the wording:
 \"\"\"{user_idea}\"\"\""""
 
-    return f"""You are the LEAD NARRATIVE DESIGNER for a solo D&D 5e dark-fantasy RPG. You are not
-writing a short story — you are authoring a "CAMPAIGN BIBLE": a single source-of-truth reference
-document that a SMALLER, WEAKER AI (running live as the Dungeon Master, ~14B parameters, no
-memory beyond what you give it plus the raw chat log) will rely on for the ENTIRE campaign,
-roughly 50-80 turns.
+    return f"""You are the LEAD NARRATIVE DESIGNER for a solo D&D 5e dark-fantasy RPG. You are
+authoring a "CAMPAIGN BIBLE": a CANON reference document — only things that would BREAK THE
+MAIN PLOT if removed. Everything else (minor NPCs, throwaway monsters, specific locations for
+a single scene) is generated LATER, per-milestone, by a separate system as the story unfolds —
+you do NOT invent those here. Ask yourself for every field: "if this were deleted, does the
+main plot break? If yes, it belongs here. If no, leave it out."
 
-That DM AI cannot re-derive anything you leave vague. Every field below exists to prevent a
-SPECIFIC, OBSERVED failure of a small DM model — you are patching these failures directly:
-- vague NPC motivation -> NPCs just stand around waiting for the player, never act on their own
-- no ordered boss plan -> the boss never progresses, the threat feels frozen for 50 turns
-- no story checkpoints -> the DM wanders in circles, forgets the main quest exists
-- no revelation ordering -> the DM spoils the twist turn 2, or never reveals it at all
-- no idle/failure consequence -> if the player stalls (wandering, fishing, avoiding the plot),
-  nothing happens, there is no pressure to engage
-- no explicit "never reveal" list -> the DM improvises and accidentally confirms player guesses
-  about the twist before it's earned
-- no named locations tied to NPCs -> the player wanders empty generic scenery and never runs
-  into anyone
+A SMALLER, WEAKER AI (running live as the Dungeon Master, ~14B parameters, no memory beyond
+what it's given each turn) will rely on this Bible for the entire campaign. It cannot re-derive
+anything you leave vague:
+- vague antagonist plan -> the threat never progresses, feels frozen for the whole campaign
+- no act structure with exit conditions -> the DM wanders in circles, forgets what act it's in
+- no narrative constraints -> the DM improvises contradictions turn to turn
+- no named factions/major NPCs -> nothing moves in the world except the player's own actions
 
 {seed_instruction}
 
@@ -561,165 +545,151 @@ lasers, drones, cyberpunk, "it's all a simulation"). If the hook implies illusio
 reframe it through MAGIC (a god's curse, a fey mirror-realm, a mad archmage's dream-prison, a
 doppelganger plot) — never through technology.
 
-Every field below except "theme" must be PLAIN ENGLISH ONLY — no Chinese or other language
-mixed in, not even a single stray word.
+Every field below except "campaign.theme" must be PLAIN ENGLISH ONLY — no Chinese or other
+language mixed in, not even a single stray word.
 
-BE CONCISE EVERYWHERE (important — this whole document gets re-sent to the DM in full on EVERY
-single turn for 50-80 turns, so bloated fields cost real latency budget every turn of the whole
-campaign): unless a field explicitly asks for more, write ONE short, punchy, information-dense
-sentence — not two or three. Prefer concrete nouns over flowing prose. Cut filler words. A
-description like "A gaunt scholar with ink-stained fingers, terrified of being overheard" beats
-a longer, softer paragraph saying the same thing.
+BE CONCISE EVERYWHERE (this whole document gets re-sent to the DM in full on EVERY turn of the
+whole campaign, so bloated fields cost real latency budget every single turn): unless a field
+explicitly asks for more, write ONE short, punchy, information-dense sentence — not two or
+three. Prefer concrete nouns over flowing prose.
 
-## WHAT YOU MUST DESIGN (build these together so they reinforce each other — e.g. the plot
-twist should be foreshadowed by an NPC's secret, the boss's plan_stages should be WHY the
-story_milestones escalate when they do)
+Every character/monster gets an "appearance" (English sentence, for narration) AND a
+"visual_prompt" (English, short comma-separated visual traits only — species/build, clothing/
+gear, notable features, mood/lighting — for an image generator, NOT shown to the player, no
+need for full sentences).
 
-1. PREMISE & TONE — the real situation behind the hook (secret, only the DM reads it) and the
-   emotional register of the whole campaign (2-5 words, e.g. "grim, mournful, quietly dreadful").
+## WHAT YOU MUST DESIGN
 
-2. SETTING DETAIL — name the specific world/region/city this takes place in, plus 2-4 sentences
-   of concrete texture (geography, ruling power, culture, what makes it strange).
+1. CAMPAIGN — title, theme (see instruction above), genre (2-4 words), tone (2-5 words, e.g.
+   "grim, mournful, quietly dreadful"), estimated_length.target_milestones: an INTEGER 8-14 —
+   your estimate of how many milestones (across all 3 acts) this story needs to reach a
+   satisfying finale in roughly 1-2 hours of solo play. This is a hard budget a later system
+   will pace against, so pick a number that actually matches the story's scope.
 
-3. STARTING LOCATION & OPENING HOOK — the EXACT place the character is in when the campaign
-   begins (this MUST match/follow directly from the hook's situation — e.g. if the hook says
-   "you wake in a tomb," the starting location IS that tomb, not somewhere else). Give it a
-   name and 2-3 sentences of concrete description. Then give opening_hook: ONE concrete,
-   physical thing already present at this exact location — an object, a body, a mark, a sound,
-   a locked door, a stranger arriving — that the character can immediately notice/investigate
-   and which starts pulling them toward story_milestones[0]. This is what stops the DM from
-   opening on a vague empty scene with nothing to do: there must be a specific first thread to
-   pull on, sitting right in front of the character from turn 1.
+2. WORLD — overview (2-4 sentences: geography, ruling power, culture, what makes it strange),
+   timeline (1-2 sentences of relevant backstory/history leading to now), major_locations
+   (2-4 concrete NAMED places that matter to the PREMISE itself, not to any single scene —
+   e.g. the capital, the cult's stronghold — never a place that only matters for one moment),
+   major_factions (1-3 organized groups with their own goal/methods/relationship_to_player,
+   independent of the player — they act off-screen even when unseen).
 
-4. STORY MILESTONES — 6 to 10 ORDERED checkpoints carrying the campaign from the opening_hook
-   to finale across ~50-80 turns. Milestone 1 should be the natural next step after the
-   character acts on opening_hook. Each milestone is a concrete STATE CHANGE in what the player
-   has learned/done/unlocked (not a vague vibe) — order matters, milestone 3 must only make
-   sense after milestone 2. This is the DM's map: whenever it loses track of "what's happening,"
-   it re-reads this list and finds the next uncompleted one instead of wandering.
+3. STORY — main_goal (what the character is ultimately trying to achieve), main_conflict (the
+   central tension driving the whole campaign, one sentence), hidden_truths (2-4 SECRET facts
+   behind the hook — the twist, a hidden identity, the villain's true plan — each with a short
+   id and description; these are NEVER shown to the DM directly turn-to-turn, only surfaced
+   later through milestones, so don't worry about revelation order here), main_plot (2-3
+   sentences: the throughline connecting opening to finale), narrative_constraints (2-4 hard
+   rules the DM must never violate, e.g. "X's identity must never be confirmed before Act 3",
+   "the character cannot permanently leave [place] before Y").
 
-5. SECRETS + REVELATION ORDER — every secret fact behind the hook (the twist, NPC hidden
-   identities, the villain's true plan, etc.), each tagged with WHEN it's safe to reveal:
-   public = fine to hint anytime, mid_game/late_game = only after enough milestones are done,
-   finale = only in the climax. This is what stops the DM from blurting the twist turn 2 OR
-   sitting on it forever.
+4. CHARACTERS — main_antagonist: name/desc/appearance/visual_prompt/moveset/behavior PLUS
+   ultimate_goal (one sentence) and plan_stages (3-5 ORDERED concrete steps they're executing
+   toward that goal RIGHT NOW, independent of the player — this is what stops the threat from
+   being a static fact that never moves). key_npcs: 2-4 named NPCs who matter to the MAIN plot
+   across the whole campaign (not a single milestone) — for each: gender (fixed ground truth
+   for pronouns), role (ally/rival/neutral/antagonist-adjacent), motivation, personality,
+   relationships (who they trust/distrust and why), secrets (what they're hiding), appearance,
+   visual_prompt.
 
-6. FACTIONS — 1-3 organized groups with their own goal and methods, independent of the player.
-   State their relationship to the player and (if relevant) to each other. Factions give the DM
-   something to move even when the player isn't looking.
+5. CONTENT — major_monsters: 1-3 LEGENDARY/recurring-threat creatures tied to the main plot
+   (not generic fodder — those get invented per-milestone later) — name/species/appearance/
+   visual_prompt/moveset/behavior. important_items: 1-3 PLOT-CRITICAL items (a relic, a key,
+   evidence) that persist across the whole campaign regardless of which milestone is active —
+   name/description/significance (why it matters to the main plot).
 
-7. NPCs — 3-5 named NPCs. For EACH you must give: gender ("male"/"female" — fixed ground truth
-   for pronouns so the small DM model never has to guess/switch mid-campaign), what they WANT
-   (motivation), who they TRUST, who they DISTRUST/fear, a SECRET they're hiding (can be small),
-   and — critically — autonomous_behavior: literally what this NPC is doing turn-to-turn if the
-   player never interacts with them (their own agenda in motion). This is what stops NPCs from
-   just standing in place waiting to be talked to.
+6. ACTS — exactly 3 acts. For each: purpose (1-2 sentences: what this act is about),
+   entry_condition (what must be true to begin it — Act 1 is always "Campaign start"),
+   exit_condition (the CONCRETE state change that ends this act and starts the next — this is
+   what a later per-milestone system checks against to know when to advance). Acts should
+   escalate: Act 1 establishes the mystery/stakes, Act 2 is investigation/complication, Act 3
+   is confrontation/resolution.
 
-8. KEY LOCATIONS — 3-6 concrete NAMED places tied to the story (never generic "a forest"),
-   INCLUDING the starting_location itself as one of them (reuse the exact same name). For each,
-   list which NPCs can plausibly be found/encountered there. This is what stops the DM from
-   wandering the player through empty scenery with no one to meet — it now has a map of WHERE
-   to put people.
+7. POSSIBLE_ENDINGS — 2-3 candidate endings for the finale, each with name, description (what
+   happens), and trigger_condition (what player behavior/choices across the campaign would make
+   THIS ending the fitting one — e.g. "player prioritized public justice over secrecy"). A later
+   system picks whichever fits based on how the player actually played, so make the trigger
+   conditions genuinely distinguishable from each other, not near-identical.
 
-9. MONSTERS — 3-5 objects, thematically fitting this world (name/species/appearance/moveset/
-   behavior). Vary species/silhouette — not all the same creature type.
-
-10. BOSS — full flavor block (name/desc/appearance/moveset/behavior) PLUS:
-    - ultimate_goal: what they actually want, one sentence.
-    - plan_stages: 3-5 ORDERED concrete steps the boss is executing toward that goal RIGHT NOW,
-      independent of the player (e.g. stage 1 "gathering a relic", stage 2 "performing a partial
-      ritual", stage 3 "eliminating a witness", stage 4 "breaking the seal"). This is what stops
-      "the boss wants to revive a god" from being a static fact that never moves — the DM can
-      advance the boss through concrete stages as turns pass, making the threat feel alive.
-
-11. FAILURE STATE — if the player stalls, avoids the main plot, or wastes many turns on
-    unrelated activity, the world must NOT wait patiently. Give idle_turn_threshold (an int —
-    how many turns of avoiding the main plot before the world acts on its own) and a CONCRETE
-    description of what happens autonomously (the boss advances a plan_stage, an NPC is
-    captured/killed, a location falls, a faction makes a move) — always escalating stakes, never
-    a passive "nothing happens."
-
-12. PACING GUIDANCE — one short paragraph mapping story_milestones roughly onto a 50-80 turn
-    campaign (e.g. "milestones 1-2 in turns 1-15 (setup), 3-6 in turns 16-55 (investigation/
-    escalation), 7-8 in turns 56-75 (confrontation), finale in the last ~5-10 turns").
-
-13. DM DIRECTIVES — never_reveal: a short list of specific facts/phrasings the DM must never
-    state outright before their tier is reached (your last line of defense against spoiling).
-    npc_encounter_rule: one sentence instructing the DM to proactively place NPCs into scenes at
-    their key_locations rather than passively waiting for the player to seek them out.
+8. STORY_BEATS — 4-8 MANDATORY plot beats spread across the 3 acts (at least 1 per act, weighted
+   toward whichever acts carry more narrative weight) — each a concrete, story-critical event that
+   MUST occur at some point during its act for the main plot to hold together (e.g. "the character
+   learns X", "the character obtains Y", "the character confronts Z"). A beat is NOT the same as
+   its act's exit_condition (that's the single gate that ends the act) — a beat is one required
+   story POINT inside the act, and an act can (and usually should) contain 2+ beats before its
+   exit_condition is met. A later system (the MILESTONE DESIGNER, generating ONE milestone at a
+   time as the story actually unfolds) will invent a DIFFERENT concrete scene/method to realize
+   each beat depending on how the player plays — you are fixing WHAT must happen, never HOW.
+   Each: id (short snake_case, e.g. "sb1"), act (integer 1-3, matching the acts array), description
+   (ONE concrete sentence, plain English, phrased as something that happens/is learned/is obtained
+   — never a vague theme like "tension rises").
 
 ## SELF-CHECK — do this BEFORE writing your final answer. Think it through fully, find every
 problem, and SILENTLY FIX each one. Only the corrected final JSON should appear in your output —
 never narrate the check itself or mention having done it.
-- TIMELINE: do story_milestones and boss.plan_stages follow ONE consistent causal order with no
-  contradictions (nothing references an event that hasn't logically happened yet)?
-- MOTIVATION: does every NPC's autonomous_behavior actually follow from their stated motivation/
-  trusts/distrusts? Would a reader ask "wait, why would they do that"? If so, fix the motivation
-  or the behavior so they align.
-- REVELATION SAFETY: does anything placed in "public" tier accidentally give away a "finale"
-  tier secret? If so, move it to a later tier or soften its wording.
-- PACING: is there enough content across story_milestones + boss.plan_stages to sustain 50-80
-  turns without feeling thin, and not so much that it can't resolve by the finale?
-- COHERENCE: do the NPCs, factions, and boss all connect to ONE coherent plot (not disjointed
-  set-pieces)? Does plot_twist actually recontextualize main_goal in a way the player could not
-  have guessed from the theme alone?
-- COMPLETENESS: does every npc "key" referenced in story_milestones.npc_involved and
-  key_locations.npc_keys_present actually exist in the npcs list? Does every secret "id"
-  referenced in revelation_order actually exist in secrets? Does starting_location.name exactly
-  match one of the entries in key_locations? Does opening_hook logically lead toward
-  story_milestones[0] (not some unrelated later milestone)?
-- LANGUAGE: re-read EVERY string value you are about to output EXCEPT "theme". Is any of it in
-  Vietnamese, Chinese, or any language other than English? Fix any that are — rewrite them in
-  English. This is a common mistake, check it carefully field by field (premise, tone, setting,
-  main_goal, plot_twist, moral_dilemma, every milestone title/description, every secret
-  description, every faction field, every npc field, every location field, every monster field,
-  boss fields, failure_state description, pacing_guidance, dm_directives) — "theme" is the ONLY
-  field allowed to be Vietnamese.
+- SCOPE DISCIPLINE: does everything you wrote actually matter to the MAIN plot across the whole
+  campaign? If something feels like it only matters for one scene/moment, CUT it — it belongs
+  in a later milestone, not here.
+- COHERENCE: do world, characters, content, and acts all connect to ONE coherent plot? Does
+  main_conflict actually follow from the hook?
+- ACT PROGRESSION: does each act's exit_condition logically lead into the next act's purpose?
+  Is Act 3's exit_condition an actual satisfying resolution, not a vague non-ending?
+- ENDING DISTINCTNESS: are the possible_endings' trigger_conditions genuinely different axes
+  (not two near-identical "good vs slightly-less-good" outcomes)?
+- STORY BEATS: does every beat's "act" genuinely fit BEFORE that act's exit_condition (not after
+  it, not contradicting it)? Is each beat concrete enough that a later milestone designer could
+  recognize when it's been hit, without being so specific it forces one exact scene/method?
+- BUDGET SANITY: is estimated_length.target_milestones large enough to cover 3 acts without
+  feeling rushed, and small enough to resolve in ~1-2 hours (not 8+)?
+- LANGUAGE: re-read EVERY string value you are about to output EXCEPT "campaign.theme". Is any
+  of it in Vietnamese, Chinese, or any language other than English? Fix any that are.
 If you find a problem, fix it now, silently, before writing the final JSON.
 
-## FINAL LANGUAGE RULE (read this last, right before you write the JSON): "theme" = Vietnamese.
-LITERALLY EVERY OTHER STRING in the JSON below = ENGLISH ONLY, no exceptions, no Vietnamese
-words or phrases anywhere else, not even one. Double-check each field as you write it.
+## FINAL LANGUAGE RULE (read this last, right before you write the JSON): "campaign.theme" =
+Vietnamese. LITERALLY EVERY OTHER STRING in the JSON below = ENGLISH ONLY, no exceptions.
 
 ## OUTPUT — ONLY this JSON object, no markdown, no commentary, no explanation of your check:
 {{
-  "theme": "...",
-  "premise": "...",
-  "tone": "...",
-  "setting": {{"name": "...", "description": "..."}},
-  "starting_location": {{"name": "...", "description": "...", "opening_hook": "..."}},
-  "main_goal": "...",
-  "plot_twist": "...",
-  "moral_dilemma": "...",
-  "story_milestones": [
-    {{"id": "m1", "title": "...", "description": "...", "npc_involved": "npc_key_or_null"}}
-  ],
-  "secrets": [
-    {{"id": "s1", "description": "...", "reveal_tier": "public|mid_game|late_game|finale"}}
-  ],
-  "revelation_order": {{"public": ["s1"], "mid_game": [], "late_game": [], "finale": []}},
-  "factions": [
-    {{"id": "f1", "name": "...", "goal": "...", "methods": "...", "relationship_to_player": "..."}}
-  ],
-  "npcs": [
-    {{"key": "snake_case_id", "name": "...", "gender": "male|female", "role": "ally|rival|neutral|antagonist",
-      "desc": "...", "personality": "...", "appearance": "...", "motivation": "...", "trusts": "...",
-      "distrusts": "...", "secret": "...", "autonomous_behavior": "..."}}
-  ],
-  "key_locations": [
-    {{"name": "...", "description": "...", "npc_keys_present": ["snake_case_id"]}}
-  ],
-  "monsters": [
-    {{"name": "...", "species": "...", "appearance": "...", "moveset": "...", "behavior": "..."}}
-  ],
-  "boss": {{
-    "name": "...", "desc": "...", "appearance": "...", "moveset": "...", "behavior": "...",
-    "ultimate_goal": "...",
-    "plan_stages": [{{"stage": 1, "title": "...", "description": "..."}}]
+  "campaign": {{
+    "title": "...", "theme": "...", "genre": "...", "tone": "...",
+    "estimated_length": {{"target_milestones": 10}}
   }},
-  "failure_state": {{"idle_turn_threshold": 5, "description": "..."}},
-  "pacing_guidance": "...",
-  "dm_directives": {{"never_reveal": ["..."], "npc_encounter_rule": "..."}}
+  "world": {{
+    "overview": "...", "timeline": "...",
+    "major_locations": [{{"name": "...", "description": "..."}}],
+    "major_factions": [{{"name": "...", "goal": "...", "methods": "...", "relationship_to_player": "..."}}]
+  }},
+  "story": {{
+    "main_goal": "...", "main_conflict": "...",
+    "hidden_truths": [{{"id": "t1", "description": "..."}}],
+    "main_plot": "...", "narrative_constraints": ["..."]
+  }},
+  "characters": {{
+    "main_antagonist": {{
+      "name": "...", "desc": "...", "appearance": "...", "visual_prompt": "...",
+      "moveset": "...", "behavior": "...", "ultimate_goal": "...",
+      "plan_stages": [{{"stage": 1, "title": "...", "description": "..."}}]
+    }},
+    "key_npcs": [
+      {{"key": "snake_case_id", "name": "...", "gender": "male|female", "role": "ally|rival|neutral|antagonist",
+        "motivation": "...", "personality": "...", "relationships": "...", "secrets": "...",
+        "appearance": "...", "visual_prompt": "..."}}
+    ]
+  }},
+  "content": {{
+    "major_monsters": [{{"name": "...", "species": "...", "appearance": "...", "visual_prompt": "...", "moveset": "...", "behavior": "..."}}],
+    "important_items": [{{"name": "...", "description": "...", "significance": "..."}}]
+  }},
+  "acts": [
+    {{"act": 1, "purpose": "...", "entry_condition": "Campaign start.", "exit_condition": "..."}},
+    {{"act": 2, "purpose": "...", "entry_condition": "...", "exit_condition": "..."}},
+    {{"act": 3, "purpose": "...", "entry_condition": "...", "exit_condition": "..."}}
+  ],
+  "possible_endings": [
+    {{"name": "...", "description": "...", "trigger_condition": "..."}}
+  ],
+  "story_beats": [
+    {{"id": "sb1", "act": 1, "description": "..."}}
+  ]
 }}"""
 
 
@@ -751,9 +721,9 @@ def _generate_campaign_bible(theme: str = None, user_idea: str = None, model: st
     bible = _normalize_bible(parsed)
     fixed_theme = (theme or "").strip()
     if fixed_theme:
-        bible["theme"] = fixed_theme
-    elif user_idea and (parsed is None or not isinstance(parsed, dict) or not parsed.get("theme")):
-        bible["theme"] = user_idea.strip()
+        bible["campaign"]["theme"] = fixed_theme
+    elif user_idea and (parsed is None or not isinstance(parsed, dict) or not (parsed.get("campaign") or {}).get("theme")):
+        bible["campaign"]["theme"] = user_idea.strip()
     return bible
 
 
@@ -798,170 +768,151 @@ def load_campaign_bible() -> dict:
 # Context cho DM (system prompt) — bị giấu khỏi UI, chỉ DM đọc
 # ---------------------------------------------------------------------------
 
-def monster_roster_names(bible: dict) -> list:
-    """Danh sách tên quái trong roster campaign — dùng để nhắc lại ngắn gọn ở
-    turn_note mỗi lượt /chat (xem main.py), vì rule đầy đủ trong CAMPAIGN
-    BIBLE section nằm quá xa lúc model thực sự quyết định entity mới trong 1
-    system prompt rất dài, dễ bị lãng quên."""
-    if not bible:
-        return []
-    bible = _normalize_bible(bible)
-    return [m["name"] for m in bible["monsters"] if m.get("name")]
+def monster_roster_names(bible: dict, current_milestone: dict = None) -> list:
+    """Danh sách tên quái gợi ý — gộp major_monsters (Bible, cố định) với
+    possible_encounters (milestone hiện tại, disposable) — dùng để nhắc lại
+    ngắn gọn ở turn_note mỗi lượt /chat (xem dungeon_master.py), vì rule đầy
+    đủ trong CAMPAIGN BIBLE section nằm quá xa lúc model thực sự quyết định
+    entity mới trong 1 system prompt rất dài, dễ bị lãng quên."""
+    names = []
+    if bible:
+        bible = _normalize_bible(bible)
+        names.extend(m["name"] for m in bible["content"]["major_monsters"] if m.get("name"))
+    if current_milestone:
+        for e in (current_milestone.get("possible_encounters") or []):
+            if isinstance(e, dict) and e.get("name"):
+                names.append(e["name"])
+    return names
 
 
-def _milestone_tier_unlocked(milestone_index: int, total: int) -> set:
-    """Tier nào đã 'mở khoá' để lộ cho DM, dựa theo milestone_index hiện tại
-    (0-based) so với tổng số milestone — cùng ngưỡng ~1/3, ~2/3, cuối cùng mà
-    prompt sinh Campaign Bible đã dùng để tự thiết kế revelation_order, nên
-    nhất quán với ý đồ ban đầu của chính campaign đó."""
-    total = max(1, total)
-    unlocked = {"public"}
-    if milestone_index >= max(1, total // 3):
-        unlocked.add("mid_game")
-    if milestone_index >= max(2, (total * 2) // 3):
-        unlocked.add("late_game")
-    if milestone_index >= total - 1:
-        unlocked.add("finale")
-    return unlocked
-
-
-def format_campaign_context(bible: dict, turn_number: int = 0, milestone_index: int = 0) -> str:
-    """CHỈ mớm milestone HIỆN TẠI cho DM (không phải toàn bộ danh sách) —
-    milestone_index (0-based, do main.py lưu/tăng dần khi DM báo hoàn thành
-    qua mechanics.milestone_complete) quyết định:
-    - milestone nào đang active (chi tiết đầy đủ) vs đã qua (chỉ còn tiêu đề,
-      cho continuity) vs CHƯA đọc tới (ẩn hoàn toàn — DM không được biết
-      trước, tránh tự spoil/lên kế hoạch quá xa).
-    - tier bí mật nào đã "mở khoá" (public/mid_game/late_game/finale) — bí
-      mật tier chưa mở khoá bị ẩn hoàn toàn khỏi context, không chỉ dựa vào
-      lời dặn "đừng tiết lộ" (an toàn hơn, cũng nhẹ context hơn).
-    - boss đang ở stage kế hoạch nào — chỉ hiện stage hiện tại, không hiện
-      trước các stage tương lai.
-    turn_number=0 (scene mở đầu chưa diễn ra) -> gồm cả block TURN 1 MUST
-    OPEN AT; turn_number>0 -> bỏ (đã qua rồi, tốn token vô ích)."""
+def format_campaign_context(bible: dict, current_milestone: dict = None, act_index: int = 0, turn_number: int = 0) -> str:
+    """Bible (cố định) + milestone HIỆN TẠI (đọc từ DB, sinh dần theo
+    milestone.py — KHÔNG nằm trong bible nữa) ghép thành 1 block context cho
+    DM. act_index (0-based, 0/1/2 = Act 1/2/3) quyết định act nào đang active
+    + possible_endings chỉ lộ ra khi đã ở Act 3 (act_index==2), tránh DM tự
+    kể ending quá sớm.
+    turn_number=0 (scene mở đầu chưa diễn ra) -> không có ý nghĩa đặc biệt gì
+    thêm ở đây nữa (opening_hook cũ đã chuyển thành milestone 1's objective/
+    location — xem handle_start_game() ở dungeon_master.py), giữ tham số lại
+    để tương thích chữ ký gọi cũ, không dùng bên trong."""
     if not bible:
         return ""
     bible = _normalize_bible(bible)
 
-    milestones = bible["story_milestones"]
-    total_m = len(milestones)
-    idx = max(0, min(milestone_index, total_m - 1))
+    c = bible["campaign"]
+    w = bible["world"]
+    st = bible["story"]
+    ch = bible["characters"]
+    content = bible["content"]
+    acts = bible["acts"]
+    endings = bible["possible_endings"]
 
-    past_titles = "; ".join(m["title"] for m in milestones[:idx]) or "None yet"
-    current = milestones[idx]
-    current_line = (
-        f"[{current['id']}] {current['title']} — {current['description']}"
-        + (f" (involves NPC: {current['npc_involved']})" if current.get("npc_involved") else "")
-    )
-    is_finale = idx >= total_m - 1
+    idx = max(0, min(act_index, len(acts) - 1))
+    current_act = acts[idx]
+    is_final_act = idx >= len(acts) - 1
 
-    unlocked_tiers = _milestone_tier_unlocked(idx, total_m)
-    secrets_by_id = {sec["id"]: sec for sec in bible["secrets"]}
-
-    def _tier_lines(tier):
-        if tier not in unlocked_tiers:
-            return "(locked — not reached yet)"
-        ids = bible["revelation_order"].get(tier) or []
-        lines = [f"[{sid}] {secrets_by_id[sid]['description']}" for sid in ids if sid in secrets_by_id]
-        return "; ".join(lines) or "None"
-
-    faction_lines = "; ".join(
-        f"{f['name']} ({f['id']}) — goal: {f['goal']} | methods: {f['methods']} | "
-        f"toward player: {f['relationship_to_player']}"
-        for f in bible["factions"]
+    loc_lines = "; ".join(f"{l['name']} — {l['description']}" for l in w["major_locations"]) or "None"
+    fac_lines = "; ".join(
+        f"{f['name']} — goal: {f['goal']} | methods: {f['methods']} | toward player: {f['relationship_to_player']}"
+        for f in w["major_factions"]
     ) or "None"
 
     npc_lines = "\n".join(
         f"- {n['name']} ({n['key']}, {n['role']}{', ' + n['gender'] if n.get('gender') else ''}) — "
-        f"{n['desc']} | personality: {n['personality']} | "
-        f"appearance: {n['appearance']} | wants: {n['motivation']} | trusts: {n['trusts'] or '-'} | "
-        f"distrusts: {n['distrusts'] or '-'} | secret: {n['secret'] or '-'} | "
-        f"off-screen right now: {n['autonomous_behavior']}"
-        for n in bible["npcs"]
+        f"wants: {n['motivation']} | personality: {n['personality']} | relationships: {n['relationships']} | "
+        f"secret: {n['secrets'] or '-'} | appearance: {n['appearance']}"
+        for n in ch["key_npcs"]
     ) or "None"
 
-    location_lines = "; ".join(
-        f"{l['name']} — {l['description']}"
-        + (f" [NPCs found here: {', '.join(l['npc_keys_present'])}]" if l.get("npc_keys_present") else "")
-        for l in bible["key_locations"]
-    ) or "None"
+    antagonist = ch["main_antagonist"]
+    antagonist_line = f"{antagonist['name']} — {antagonist['desc']}"
+    if antagonist.get("appearance"):
+        antagonist_line += f" | appearance: {antagonist['appearance']}"
+    if antagonist.get("moveset"):
+        antagonist_line += f" | moveset: {antagonist['moveset']}"
+    if antagonist.get("behavior"):
+        antagonist_line += f" | behavior: {antagonist['behavior']}"
+    stages = antagonist.get("plan_stages") or []
+    stage_line = "None"
+    if stages:
+        # Stage hiện tại tỉ lệ thuận theo act đang ở — suy ra thay vì cần 1
+        # field self-report riêng, đủ chính xác cho mục đích "đang làm gì".
+        stage_pos = min(len(stages) - 1, (idx * len(stages)) // max(1, len(acts)))
+        cs = stages[stage_pos]
+        stage_line = f"Stage {cs['stage']}: {cs['title']} — {cs['description']}"
+        if stage_pos < len(stages) - 1:
+            stage_line += f" ({len(stages) - 1 - stage_pos} further stage(s) beyond this, not yet revealed)"
 
     monster_lines = "; ".join(
-        f"{m['name']}"
-        + (f" ({m['species']})" if m.get("species") else "")
+        f"{m['name']}" + (f" ({m['species']})" if m.get("species") else "")
         + (f" — appearance: {m['appearance']}" if m.get("appearance") else "")
         + (f" | moveset: {m['moveset']}" if m.get("moveset") else "")
         + (f" | behavior: {m['behavior']}" if m.get("behavior") else "")
-        for m in bible["monsters"]
+        for m in content["major_monsters"]
     ) or "None"
+    item_lines = "; ".join(f"{it['name']} — {it['description']}" for it in content["important_items"]) or "None"
 
-    boss = bible["boss"]
-    boss_line = f"{boss['name']} — {boss['desc']}"
-    if boss.get("appearance"):
-        boss_line += f" | appearance: {boss['appearance']}"
-    if boss.get("moveset"):
-        boss_line += f" | moveset: {boss['moveset']}"
-    if boss.get("behavior"):
-        boss_line += f" | behavior: {boss['behavior']}"
+    constraints = "; ".join(st["narrative_constraints"]) or "None"
 
-    stages = boss.get("plan_stages") or []
-    if stages:
-        # Boss stage hiện tại tỉ lệ thuận với milestone hiện tại (không cần
-        # 1 field self-report riêng cho boss — suy ra từ tiến độ milestone,
-        # đủ chính xác cho mục đích "boss đang làm gì" mà không thêm state).
-        stage_pos = min(len(stages) - 1, (idx * len(stages)) // max(1, total_m))
-        current_stage = stages[stage_pos]
-        stage_line = f"Stage {current_stage['stage']}: {current_stage['title']} — {current_stage['description']}"
-        if stage_pos < len(stages) - 1:
-            stage_line += f" ({len(stages) - 1 - stage_pos} further stage(s) beyond this, not yet revealed)"
+    endings_block = ""
+    if is_final_act and endings:
+        endings_lines = "\n".join(f"- {e['name']}: {e['description']} (fits when: {e['trigger_condition']})" for e in endings)
+        endings_block = f"\nPOSSIBLE ENDINGS (Act 3 — pick whichever fits how the story actually played out, weave toward it):\n{endings_lines}\n"
+
+    # --- Milestone hiện tại (sinh dần, KHÔNG nằm trong bible) ---
+    if current_milestone:
+        m = current_milestone
+        ms_npcs = "; ".join(
+            f"{n.get('name')} ({n.get('role', 'npc')})" for n in (m.get("npcs") or []) if isinstance(n, dict) and n.get("name")
+        ) or "None"
+        ms_loc = m.get("location") or {}
+        ms_loc_line = f"{ms_loc.get('name', '')} — {ms_loc.get('description', '')}" if ms_loc.get("name") else "Same as current scene"
+        ms_encounters = "; ".join(
+            f"{e.get('name')}" for e in (m.get("possible_encounters") or []) if isinstance(e, dict) and e.get("name")
+        ) or "None"
+        milestone_block = f"""
+CURRENT MILESTONE (this is your map for right now — aim scenes at this, not the whole campaign):
+{m.get('title', '')} — objective: {m.get('objective', '')}
+Why this matters to the story: {m.get('story_purpose', '')}
+Succeeds when: {m.get('success_condition', '')}
+Fails when (a real, accumulated narrative state — NOT a single failed roll): {m.get('failure_condition', '')}
+Must reveal to the player before this milestone ends: {m.get('required_reveal') or 'Nothing specific.'}
+Must NOT reveal yet: {m.get('forbidden_reveal') or 'Nothing specific.'}
+Suggested (not mandatory) NPCs for this stretch: {ms_npcs}
+Suggested (not mandatory) location: {ms_loc_line}
+Suggested (not mandatory) encounters: {ms_encounters}
+When this milestone's success OR failure condition is clearly met by the story, set
+mechanics.milestone_complete=true, mechanics.milestone_outcome_summary (English, one sentence:
+what actually happened), and mechanics.act_complete (true only if this also satisfies the
+CURRENT ACT's exit_condition below)."""
     else:
-        stage_line = "None"
+        milestone_block = """
+CURRENT MILESTONE: (transitioning — the next one is still being prepared) use your own judgment
+based on ACT purpose/exit_condition and the story so far; do not stall, keep the scene moving."""
 
-    failure = bible["failure_state"]
-    never_reveal = "; ".join(bible["dm_directives"].get("never_reveal") or []) or "None"
-    npc_rule = bible["dm_directives"].get("npc_encounter_rule") or "place NPCs proactively at their key_locations."
+    return f"""## CAMPAIGN BIBLE — canon, overrides generic improvisation. Never dump verbatim/spoil early; unfold through play.
 
-    opening_block = (
-        f"\nTURN 1 MUST OPEN AT: {bible['starting_location']['name']} — {bible['starting_location']['description']}\n"
-        f"Weave this in immediately: {bible['starting_location']['opening_hook']}\n"
-        if turn_number <= 0 else ""
-    )
-    twist_line = (
-        bible['plot_twist'] if is_finale
-        else "(locked — a deeper truth exists but is not yet yours to know; do not invent or hint at specifics beyond what current secrets/NPCs already imply)"
-    )
+CAMPAIGN: {c['title']} ({c['genre']}, tone: {c['tone']})
+World: {w['overview']}
+Timeline: {w['timeline']}
+Major locations: {loc_lines}
+Major factions (act on their own agenda even off-screen): {fac_lines}
 
-    return f"""## CAMPAIGN BIBLE — source of truth, overrides generic improvisation. Never dump verbatim/spoil early; unfold through play.
+Main goal: {st['main_goal']}
+Main conflict: {st['main_conflict']}
+Narrative constraints (never violate): {constraints}
 
-PREMISE ({bible['tone'] or 'dark fantasy'}): {bible['premise']}
-World: {bible['setting']['name']} — {bible['setting']['description']}
-Main goal: {bible['main_goal']}
-Twist (secret, only unlocked at finale, never state outright before then): {twist_line}
-Moral dilemma: {bible['moral_dilemma']}
-{opening_block}
-STORY PROGRESS — completed so far (titles only): {past_titles}
-CURRENT MILESTONE (aim every scene at completing this — do not skip ahead, do not reveal what comes after it):
-{current_line}
-{"This is the FINAL milestone — bring the story to its climax and resolution." if is_finale else "When this milestone's condition is clearly met by the story, set mechanics.milestone_complete=true so the next one unlocks."}
-
-SECRETS (only tiers reached so far are unlocked; locked ones are fully hidden from you — if the player guesses one, deflect, don't confirm):
-public: {_tier_lines('public')}
-mid_game: {_tier_lines('mid_game')}
-late_game: {_tier_lines('late_game')}
-finale: {_tier_lines('finale')}
-Never state outright before unlocked: {never_reveal}
-
-FACTIONS (act on their own agenda even off-screen): {faction_lines}
-
-NPCs ({npc_rule} Roleplay consistently; off-screen behavior should surface as rumors/consequences even when unseen.)
+KEY NPCs (proactively place them into scenes rather than passively waiting for the player to seek them out; roleplay consistently; off-screen behavior should surface as rumors/consequences even when unseen.)
 {npc_lines}
 
-LOCATIONS (use to decide where scenes happen / who's encountered — don't invent disconnected generic scenery): {location_lines}
+MAIN ANTAGONIST: {antagonist_line}
+Goal: {antagonist.get('ultimate_goal', '')}
+Current plan stage (surface indirectly via rumors/minions/omens until ready to climax): {stage_line}
 
-MONSTER ROSTER — MANDATORY source for any NEW hostile creature (reuse exact name/species/appearance/moveset/behavior); only invent outside it if truly nothing here fits: {monster_lines}
+RECURRING MONSTERS (reuse exact name/species/appearance/moveset/behavior for these specifically; other minor creatures may be invented freely per scene): {monster_lines}
 
-BOSS: {boss_line}
-Goal: {boss.get('ultimate_goal', '')}
-Current plan stage (surface indirectly via rumors/minions/omens until the arc is ready to climax): {stage_line}
+IMPORTANT ITEMS (persist across the whole campaign, not tied to any one milestone): {item_lines}
 
-FAILURE STATE — if player avoids main plot ~{failure.get('idle_turn_threshold', 5)}+ turns straight, world acts anyway (never passive): {failure.get('description', '')}"""
+ACT {current_act['act']}/3 (current): {current_act['purpose']}
+This act ends when: {current_act['exit_condition']}
+{endings_block}{milestone_block}"""

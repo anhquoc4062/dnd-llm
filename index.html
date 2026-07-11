@@ -92,19 +92,14 @@
           <select id="campaign-select" class="input" disabled>
             <option value="">— Chưa có kịch bản, bấm "Tạo 5 kịch bản" —</option>
           </select>
-          <button type="button" id="campaign-confirm-btn" class="secondary-btn" disabled>✅ Xác nhận kịch bản</button>
         </div>
 
         <div id="campaign-custom-panel" class="campaign-panel hidden">
           <textarea id="campaign-custom-text" class="input" rows="3" maxlength="400"
             placeholder="Viết ý tưởng kịch bản của riêng bạn (vd: một cuộc trả thù cho gia tộc bị phản bội)…"></textarea>
-          <button type="button" id="campaign-expand-btn" class="secondary-btn">✅ Xác nhận kịch bản</button>
         </div>
 
-        <p id="campaign-status" class="hint"></p>
-        <div id="campaign-chosen" class="campaign-chosen hidden">
-          <strong>Kịch bản đã chọn:</strong> <span id="campaign-chosen-theme"></span>
-        </div>
+        <p id="campaign-status" class="hint">Chọn hoặc viết kịch bản — kịch bản sẽ được khai triển đầy đủ ngay khi bạn bấm "Khởi tạo nhân vật".</p>
       </section>
 
     </div>
@@ -172,6 +167,20 @@
       </div>
     </div>
 
+  </div>
+</div>
+
+<!-- ============ MODAL TIẾN TRÌNH TẠO CAMPAIGN ============ -->
+<div id="setup-modal-overlay" class="setup-modal-overlay hidden">
+  <div class="setup-modal">
+    <h2 class="setup-modal-title">⚔️ Đang Dựng Thế Giới…</h2>
+    <ul class="setup-steps">
+      <li id="setup-step-bible" class="setup-step" data-stage="bible">Đang dựng thế giới…</li>
+      <li id="setup-step-milestone" class="setup-step" data-stage="milestone">Đang chuẩn bị chặng đầu…</li>
+      <li id="setup-step-opening" class="setup-step" data-stage="opening">Đang mở màn…</li>
+    </ul>
+    <p id="setup-error-text" class="setup-error hidden"></p>
+    <button type="button" id="setup-retry-btn" class="secondary-btn hidden">Thử lại</button>
   </div>
 </div>
 

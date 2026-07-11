@@ -6,17 +6,37 @@ agents/assistant.py (ngoài truyện).
 
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 import ollama
 
 import db
 from config import MODEL, OPTIONS
-from . import classification, entities, imagegen, social, summarizer, campaign, lore, translation, world_state
+from . import classification, context_writer, entities, imagegen, milestone, social, summarizer, campaign, lore, text_utils, world_state
 
 ATTR_LABELS = {
     "str": "STR/Sức mạnh", "dex": "DEX/Nhanh nhẹn", "con": "CON/Thể chất",
     "int": "INT/Trí tuệ", "wis": "WIS/Khôn ngoan", "cha": "CHA/Sức hút",
 }
+
+# ollama.chat() ở milestone.generate_milestone() (và, khi gọi từ orchestrator
+# tạo campaign mới trong main.py, cả handle_start_game() bên dưới) là lời gọi
+# ĐỒNG BỘ (blocking) — chạy qua executor riêng khi cần bất đồng bộ thật, nếu
+# không sẽ chặn event loop chính (giống lý do imagegen.py dùng executor riêng).
+_BG_LLM_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+
+
+async def _generate_next_milestone_async(char_id, bible, story_state, act_index, milestone_number, target_total):
+    loop = asyncio.get_running_loop()
+    try:
+        ms = await loop.run_in_executor(
+            _BG_LLM_EXECUTOR, milestone.generate_milestone,
+            bible, story_state, act_index, milestone_number, target_total,
+        )
+        db.save_current_milestone(char_id, ms)
+        print(f"[DEBUG] milestone kế tiếp đã sinh xong: {ms.get('title')}")
+    except Exception as e:
+        print(f"[DEBUG] lỗi generate milestone kế tiếp: {e}")
 
 # Milestone bị "kẹt" (model không tự báo milestone_complete dù nội dung đã đủ
 # điều kiện) từng khiến 1 campaign đứng yên ở milestone đầu tiên suốt 50+ lượt
@@ -235,16 +255,15 @@ def build_system_prompt(char) -> str:
                 parts.append(label)
         return "; ".join(p for p in parts if p) or "None"
 
-    # turn_number > 0 -> đã qua khỏi scene mở đầu, KHÔNG cần nhắc lại
-    # "TURN 1 MUST OPEN AT ..." mỗi lượt nữa (chỉ tốn token context vô ích,
-    # xem format_campaign_context) -> tiết kiệm vài trăm token/lượt.
-    # milestone_index -> chỉ mớm milestone HIỆN TẠI (không phải cả danh
-    # sách) + chỉ mở khoá secret/boss-stage theo đúng tiến độ đã tới, vừa cắt
-    # mạnh context mỗi lượt vừa chặn model tự spoil milestone/twist chưa tới.
+    # Bible cố định (canon) + milestone HIỆN TẠI (sinh dần theo diễn biến thật
+    # — xem agents/milestone.py, KHÔNG còn là 1 mảng cố định trong bible nữa)
+    # -> chỉ mớm đúng milestone đang active, không phải cả campaign, vừa cắt
+    # mạnh context mỗi lượt vừa chặn model tự spoil chuyện chưa tới.
     campaign_block = campaign.format_campaign_context(
         db._load_campaign_bible(char),
+        current_milestone=db.load_current_milestone(char),
+        act_index=char["campaign_act_index"] if "campaign_act_index" in char.keys() else 0,
         turn_number=char["current_turn"] or 0,
-        milestone_index=char["campaign_milestone_index"] if "campaign_milestone_index" in char.keys() else 0,
     )
 
     return f"""/no_think
@@ -371,9 +390,9 @@ EXISTING (key already in ACTIVE ENTITIES): send ONLY key + hp_change (negative=d
 positive=heal) + "status":"dead"/"fled" if applicable — never resend max_hp/type/name, never
 switch its species mid-scene, never invent stats for it.
 Monster names must be English, never Vietnamese.
-NEW entity only: "description" (Vietnamese, one sentence, shown to player) + "visual_prompt"
-(English, comma-separated visual traits — species/build/clothing/features — for image gen, not
-shown to player). Omit both when only updating an EXISTING entity.
+Do NOT write "description" or "visual_prompt" for entities — a separate system resolves the
+player-facing description and the image prompt from your story text + the campaign roster after
+you respond, so writing them here only wastes your token budget.
 
 ## LOOT — PERSISTENCE RULES
 loot_dropped: only when the story this turn explicitly shows an item becoming available (kill
@@ -384,10 +403,9 @@ loot without declaring it via loot_dropped first.
 
 ## LOCATION
 mechanics.location: null on most turns; set ONLY the turn the character arrives at a NEW
-distinct place (never repeat while staying put, never trigger from a passing mention). name
-(English, short), description (Vietnamese, one sentence, shown to player), visual_prompt
-(English, comma-separated visual traits — architecture/terrain/mood/lighting — for image gen,
-not shown to player).
+distinct place (never repeat while staying put, never trigger from a passing mention). Just
+name (English, short) — do NOT write description or visual_prompt, same reason as ENTITIES
+above: a separate system resolves those from your story text afterward.
 
 ## LANGUAGE
 100% Vietnamese output, no exceptions, even in unclear/conflicting cases — just decide silently
@@ -404,12 +422,13 @@ Do NOT output "success"/"roll_type" — backend already decided those; writing t
     "event_occurred": false,
     "character_died": false,
     "milestone_complete": false,
+    "milestone_outcome_summary": "",
+    "act_complete": false,
     "changes": {{"hp": 0, "mana": 0, "gold": 0, "xp": 0, "items_added": [], "items_removed": []}},
     "entities": [
       {{"key": "<unique_entity_key>", "name": "<entity_name>", "type": "monster|npc|companion|object",
         "gender": "male|female (omit/null if not a person)", "max_hp": 0, "hp": 0, "ac": 12,
-        "hostile": false, "status": "alive|dead",
-        "description": "<Vietnamese, only for NEW entity>", "visual_prompt": "<English, only for NEW entity>"}}
+        "hostile": false, "status": "alive|dead"}}
     ],
     "loot_dropped": [{{"name": "<item_name>", "source_key": "<entity_key>"}}],
     "location": null
@@ -447,9 +466,17 @@ These needs_roll/roll/dc/reason values are FINAL — if the player picks this ex
 turn, the backend reuses them as-is (no re-classification), so they must be your true judgement.
 
 milestone_complete: set true ONLY on the turn where the story you just wrote clearly satisfies
-the CURRENT MILESTONE's description from the CAMPAIGN BIBLE above (per the campaign section's
-CURRENT MILESTONE line) — this unlocks the next milestone and possibly new secrets for future
-turns, so don't set it early/speculatively, and don't forget to set it once it's genuinely true.
+the CURRENT MILESTONE's success_condition OR failure_condition (per the CAMPAIGN BIBLE section
+above) — this triggers generating the next milestone, so don't set it early/speculatively, and
+don't forget to set it once it's genuinely true (success OR failure both count as "complete",
+the story simply continues differently).
+milestone_outcome_summary: REQUIRED (English, ONE sentence) whenever milestone_complete=true —
+a factual recap of what actually happened (who's alive/dead, what was learned/lost, which path
+was taken) for a system that plans the next milestone from it. Leave "" when milestone_complete
+is false.
+act_complete: set true ONLY when milestone_complete=true AND resolving this milestone also
+satisfies the CURRENT ACT's exit_condition (per the campaign section above) — most milestones do
+NOT end an act, so default to false. Never true if milestone_complete is false.
 
 FINAL CHECK before you write "story": every single word must be Vietnamese — re-read each word
 as you write it; if any character isn't Vietnamese (Chinese, English, or otherwise, other than
@@ -464,9 +491,13 @@ an English monster/location name), fix it immediately, don't let it slip through
 def _parse_dm_json(reply: str) -> dict:
     try:
         clean_reply = reply.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean_reply)
+        result = json.loads(clean_reply)
     except json.JSONDecodeError:
-        return {"story": reply, "mechanics": {"roll_type": "normal", "reasoning": ""}, "choices": []}
+        result = {"story": reply, "mechanics": {"roll_type": "normal", "reasoning": ""}, "choices": []}
+    # Hậu kỳ: qwen3 thỉnh thoảng lẫn ký tự Hán vào câu tiếng Việt dù prompt đã
+    # cấm rõ — xem agents/text_utils.py. Áp đệ quy lên toàn bộ result (story,
+    # choices[].text, mechanics.entities[]...) tại 1 điểm duy nhất.
+    return text_utils.strip_cjk_deep(result)
 
 
 def _localize_reason_name(reason_type, name, char_dict):
@@ -575,61 +606,47 @@ async def handle_chat_classify(data: dict) -> dict:
     # entity mới, dễ bị lãng quên giữa 1 system prompt rất dài. Lặp lại ngắn
     # gọn ở đây (recency) để model khó bỏ qua hơn.
     campaign_bible = db._load_campaign_bible(char)
+    current_milestone = db.load_current_milestone(char)
     if campaign_bible:
-        roster_names = ", ".join(campaign.monster_roster_names(campaign_bible))
+        roster_names = ", ".join(campaign.monster_roster_names(campaign_bible, current_milestone))
         if roster_names and not recent_hostile_spawns:
             turn_note += (
-                f" REMINDER: if a NEW hostile monster must appear THIS turn, it MUST be one of "
-                f"the campaign's MONSTER ROSTER: {roster_names} — reuse its exact "
-                f"name/species/appearance/moveset/behavior from the CAMPAIGN section above. Do "
-                f"NOT invent a generic/unrelated monster name (e.g. \"Shadow Entity\", \"Shrouded "
-                f"Figure\") when one of these already fits the scene."
+                f" REMINDER: if a NEW hostile monster must appear THIS turn, prefer one of the "
+                f"suggested/recurring names already established: {roster_names} — reuse its exact "
+                f"name/species/appearance/moveset/behavior from the CAMPAIGN section above when it "
+                f"fits. Only invent something else if none of these fit the scene."
             )
 
     # --- Van an toàn milestone bị kẹt: model 14B hay quên tự báo
     # mechanics.milestone_complete dù nội dung đã thoả điều kiện -> campaign
     # đứng yên hàng chục lượt, hết chuyện để kể nên chỉ còn biết lặp
-    # thoại/spam quái làm "nội dung". SOFT nhắc mạnh hơn; HARD ép backend tự
-    # chuyển milestone (không đợi model tự giác nữa) và reload lại `char` để
-    # phần build_system_prompt() phía dưới thấy đúng milestone mới.
-    if campaign_bible:
-        nb_check = campaign._normalize_bible(campaign_bible)
-        milestones_check = nb_check["story_milestones"]
-        total_m = len(milestones_check)
-        idx = max(0, min(
-            char["campaign_milestone_index"] if "campaign_milestone_index" in char.keys() else 0,
-            total_m - 1,
-        ))
+    # thoại/spam quái làm "nội dung". SOFT chỉ nhắc mạnh hơn; HARD vừa nhắc
+    # mạnh vừa đặt cờ force_milestone_complete (đọc lại ở handle_chat_narrate)
+    # để backend TỰ ép milestone_complete=true nếu model vẫn phớt lờ — không
+    # còn "chuyển sang milestone kế" bằng cách tăng index vào mảng có sẵn như
+    # trước (milestone giờ sinh động, không có mảng để nhảy tới).
+    force_milestone_complete = False
+    if current_milestone:
         milestone_advanced_turn = char["milestone_advanced_turn"] if "milestone_advanced_turn" in char.keys() else 0
         turns_stuck = current_turn_before - (milestone_advanced_turn or 0)
-        is_finale_milestone = idx >= total_m - 1
 
-        if not is_finale_milestone and turns_stuck >= MILESTONE_HARD_STUCK_TURNS:
-            new_idx = min(idx + 1, total_m - 1)
-            conn_ms = db.get_conn()
-            conn_ms.execute(
-                "UPDATE character SET campaign_milestone_index = ?, milestone_advanced_turn = ? WHERE id = ?",
-                (new_idx, current_turn_before, char["id"]),
-            )
-            conn_ms.commit()
-            conn_ms.close()
-            print(f"[DEBUG] milestone kẹt {turns_stuck} lượt -> ép chuyển {idx} -> {new_idx}")
-            char = db.get_latest_character()  # reload để build_system_prompt() thấy milestone mới
-            next_title = milestones_check[new_idx]["title"]
+        if turns_stuck >= MILESTONE_HARD_STUCK_TURNS:
+            force_milestone_complete = True
+            print(f"[DEBUG] milestone kẹt {turns_stuck} lượt -> ép force_milestone_complete=true")
             turn_note += (
-                f" STORY PIVOT: enough time has passed on the previous plot thread — THIS turn, "
-                f"wrap up/resolve the current scene quickly (a clue lands, a door opens, the "
-                f"threat is dealt with) and pivot the narrative toward the next story beat: "
-                f"\"{next_title}\". Do not stall further on the old thread."
+                f" STORY PIVOT: enough time has passed on the current milestone (\"{current_milestone['title']}\") "
+                f"— THIS turn, wrap up/resolve it decisively (success or a concrete setback, a clue "
+                f"lands, a door opens, the threat is dealt with) and set mechanics.milestone_complete="
+                f"true with a milestone_outcome_summary reflecting how it actually ended. Do not stall "
+                f"further on this thread."
             )
-        elif not is_finale_milestone and turns_stuck >= MILESTONE_SOFT_STUCK_TURNS:
-            current_ms = milestones_check[idx]
+        elif turns_stuck >= MILESTONE_SOFT_STUCK_TURNS:
             turn_note += (
-                f" PACING: {turns_stuck} turns have passed without completing the current "
-                f"milestone (\"{current_ms['title']}\" — {current_ms['description']}). Actively "
-                f"steer this turn's events toward satisfying it — introduce the key clue/turn/"
-                f"NPC action that resolves it, rather than another side detour. Set "
-                f"mechanics.milestone_complete=true as soon as it's genuinely satisfied."
+                f" PACING: {turns_stuck} turns have passed without completing the current milestone "
+                f"(\"{current_milestone['title']}\" — {current_milestone['success_condition']}). Actively "
+                f"steer this turn's events toward satisfying its success_condition or failure_condition, "
+                f"rather than another side detour. Set mechanics.milestone_complete=true as soon as "
+                f"either is genuinely met."
             )
 
     # Nhắc chống lặp thoại/prose ở NGAY SÁT cuối context (recency) — rule đầy
@@ -695,6 +712,7 @@ async def handle_chat_classify(data: dict) -> dict:
         "current_turn_before": current_turn_before,
         "turn_note": turn_note,
         "class_result": class_result,
+        "force_milestone_complete": force_milestone_complete,
     }
     conn_pending = db.get_conn()
     conn_pending.execute(
@@ -830,6 +848,11 @@ async def handle_chat_narrate() -> dict:
     char = db.get_latest_character()
     if not char:
         return {"error": "Chưa có nhân vật."}
+
+    # Nạp sẵn ở đây (dùng chung cho cả context_writer.resolve_visual bên dưới
+    # lẫn khối milestone_complete cuối hàm) — tránh đọc file/DB 2 lần.
+    campaign_bible = db._load_campaign_bible(char)
+    current_milestone = db.load_current_milestone(char)
 
     success = resolution["success"]
     roll_type = resolution["roll_type"]
@@ -1165,31 +1188,65 @@ async def handle_chat_narrate() -> dict:
         result["mechanics"]["is_dead"] = False
 
     # --- Campaign milestone: DM tự báo hoàn thành milestone hiện tại qua
-    # mechanics.milestone_complete -> backend tăng index đã lưu, MỞ KHOÁ
-    # milestone/secret/boss-stage kế tiếp cho các lượt sau (xem
-    # campaign.format_campaign_context). Không tăng nếu nhân vật vừa chết
-    # (câu chuyện đã kết thúc, không còn "lượt sau" nào để mở khoá). Bỏ cờ
-    # này khỏi mechanics trả về frontend — chỉ là tín hiệu nội bộ, không phải
-    # thứ người chơi cần thấy.
+    # mechanics.milestone_complete/milestone_outcome_summary/act_complete ->
+    # backend append story_state, chuyển act nếu cần, rồi trigger generate
+    # milestone KẾ TIẾP bất đồng bộ (agents/milestone.py, KHÔNG await — dùng
+    # đúng pattern asyncio.create_task như imagegen). Không tăng nếu nhân vật
+    # vừa chết (câu chuyện đã kết thúc). Bỏ 3 field này khỏi mechanics trả về
+    # frontend — chỉ là tín hiệu nội bộ, không phải thứ người chơi cần thấy.
+    force_milestone_complete = pending.get("force_milestone_complete", False)
     milestone_complete = bool(result["mechanics"].pop("milestone_complete", False))
+    outcome_summary = str(result["mechanics"].pop("milestone_outcome_summary", "") or "").strip()
+    act_complete_flag = bool(result["mechanics"].pop("act_complete", False))
+
+    if force_milestone_complete and not milestone_complete:
+        milestone_complete = True
+        if not outcome_summary:
+            outcome_summary = "The milestone stalled without a clear resolution and the story was forced to move on."
+        act_complete_flag = False  # backend ép complete -> không tự bịa act cũng xong theo
+
     milestone_advanced_this_turn = False
     if milestone_complete and not result["mechanics"].get("character_died"):
-        bible_for_progress = db._load_campaign_bible(char)
-        if bible_for_progress:
-            total_milestones = len(campaign._normalize_bible(bible_for_progress)["story_milestones"])
-            current_index = char["campaign_milestone_index"] if "campaign_milestone_index" in char.keys() else 0
-            new_index = min(current_index + 1, total_milestones - 1)
-            if new_index != current_index:
-                conn = db.get_conn()
-                c = conn.cursor()
-                c.execute(
-                    "UPDATE character SET campaign_milestone_index = ?, milestone_advanced_turn = ? WHERE id = ?",
-                    (new_index, turn_number, char["id"]),
-                )
-                conn.commit()
-                conn.close()
-                milestone_advanced_this_turn = True
-                print(f"[DEBUG] milestone_complete=true -> campaign_milestone_index {current_index} -> {new_index}")
+        bible_for_progress = campaign_bible
+        current_ms = current_milestone
+        if bible_for_progress and current_ms:
+            nb = campaign._normalize_bible(bible_for_progress)
+            total_acts = len(nb["acts"])
+            current_act_idx = char["campaign_act_index"] if "campaign_act_index" in char.keys() else 0
+            is_campaign_finale = current_act_idx >= total_acts - 1
+            campaign_finished = bool(act_complete_flag and is_campaign_finale)
+            new_act_idx = min(current_act_idx + 1, total_acts - 1) if (act_complete_flag and not is_campaign_finale) else current_act_idx
+
+            prior_state = char["story_state"] or ""
+            advanced_beats = current_ms.get("story_beats_advanced") or []
+            beats_note = f" [Beats: {', '.join(advanced_beats)}]" if advanced_beats else ""
+            new_state = (prior_state + f"\n[Milestone: {current_ms.get('title', '')}] {outcome_summary or 'Completed.'}{beats_note}").strip()
+            new_milestone_number = (char["campaign_milestone_number"] or 0) + 1
+
+            conn_ms = db.get_conn()
+            conn_ms.execute(
+                "UPDATE character SET story_state = ?, campaign_act_index = ?, campaign_milestone_number = ?, "
+                "milestone_advanced_turn = ?, current_milestone = NULL WHERE id = ?",
+                (new_state, new_act_idx, new_milestone_number, turn_number, char["id"]),
+            )
+            conn_ms.commit()
+            conn_ms.close()
+            milestone_advanced_this_turn = True
+            print(
+                f"[DEBUG] milestone_complete=true -> story_state appended, act {current_act_idx}->{new_act_idx}, "
+                f"milestone_number={new_milestone_number}, campaign_finished={campaign_finished}"
+            )
+
+            if not campaign_finished:
+                # Bất đồng bộ hoàn toàn — KHÔNG await, response trả về ngay,
+                # milestone mới sẽ sẵn sàng trước khi player thật sự cần tới
+                # (build_system_prompt có fallback text nếu chưa kịp xong).
+                asyncio.create_task(_generate_next_milestone_async(
+                    char["id"], bible_for_progress, new_state, new_act_idx,
+                    new_milestone_number, nb["campaign"]["estimated_length"]["target_milestones"],
+                ))
+            else:
+                print("[DEBUG] Act 3 hoàn thành -> campaign kết thúc, không sinh milestone mới.")
 
     # --- turns_since_event: đếm số lượt liên tiếp KHÔNG có "sự kiện lớn" (theo
     # mechanics.event_occurred model tự báo) -> dùng để ép force_event ở đầu
@@ -1208,22 +1265,39 @@ async def handle_chat_narrate() -> dict:
     if not isinstance(location_context, dict):
         location_context = None
 
+    # DM không còn tự viết description/visual_prompt cho entity/location MỚI
+    # nữa (xem system prompt ## ENTITIES / ## LOCATION) — resolve_visual() tra
+    # bảng Bible/Milestone trước (miễn phí), chỉ fallback qua 1 LLM call RIÊNG
+    # (model nhỏ) khi DM bịa tên hoàn toàn mới ngoài roster. Chỉ cần resolve
+    # đúng 1 lần cho context_update (thứ duy nhất thật sự dùng đến 2 field
+    # này), không phải cho mọi entity mới trong lượt.
     context_update = None
     if new_entities:
         e = new_entities[-1]
+        kind = "monster" if e["entity_type"] == "monster" else "npc"
+        loop_ctx = asyncio.get_running_loop()
+        resolved = await loop_ctx.run_in_executor(
+            _BG_LLM_EXECUTOR, context_writer.resolve_visual,
+            kind, e["name"], campaign_bible, current_milestone, result.get("story", ""),
+        )
         context_update = {
-            "kind": "monster" if e["entity_type"] == "monster" else "npc",
+            "kind": kind,
             "name": e["name"],
-            "description": e.get("description") or "",
-            "visual_prompt": e.get("visual_prompt") or e["name"],
+            "description": resolved["description"],
+            "visual_prompt": resolved["visual_prompt"],
         }
     elif location_context and location_context.get("name"):
         loc_name = str(location_context["name"]).strip()
+        loop_ctx = asyncio.get_running_loop()
+        resolved = await loop_ctx.run_in_executor(
+            _BG_LLM_EXECUTOR, context_writer.resolve_visual,
+            "location", loc_name, campaign_bible, current_milestone, result.get("story", ""),
+        )
         context_update = {
             "kind": "location",
             "name": loc_name,
-            "description": str(location_context.get("description") or "").strip(),
-            "visual_prompt": str(location_context.get("visual_prompt") or loc_name).strip(),
+            "description": resolved["description"],
+            "visual_prompt": resolved["visual_prompt"],
         }
 
     if context_update:
@@ -1363,23 +1437,22 @@ async def handle_start_game() -> dict:
     system_prompt = build_system_prompt(char)
     opening_char = db.character_row_to_dict(char)
 
-    # Nếu nhân vật có Campaign Bible, cảnh mở đầu PHẢI diễn ra đúng tại
-    # starting_location của bible đó (không phải 1 vùng Forgotten Realms bịa
-    # ngẫu nhiên) — nếu không, đoạn "invent a fitting minor location" bên
-    # dưới sẽ ghi đè/mâu thuẫn với STARTING LOCATION đã định sẵn trong system
-    # prompt (## CAMPAIGN BIBLE), vì user-turn message này nằm GẦN lúc sinh
-    # hơn nên dễ thắng theo hiệu ứng recency.
+    # Nếu nhân vật có Campaign Bible + milestone 1 (đã sinh sẵn bởi
+    # run_campaign_setup trước khi hàm này chạy — xem main.py), cảnh mở đầu
+    # PHẢI diễn ra đúng tại location của milestone 1 đó (không phải 1 vùng
+    # Forgotten Realms bịa ngẫu nhiên) — milestone 1's location CHÍNH LÀ điểm
+    # bắt đầu, bible không còn field starting_location riêng nữa.
     campaign_bible = db._load_campaign_bible(char)
+    opening_milestone = db.load_current_milestone(char)
+    opening_location = (opening_milestone or {}).get("location") or {}
 
-    # Ép AI trả về JSON ngay cả trong màn mở đầu
-    if campaign_bible and isinstance(campaign_bible.get("starting_location"), dict):
-        start_loc = campaign_bible["starting_location"]
+    if campaign_bible and opening_location.get("name"):
         location_instruction = (
             f"This campaign's world is NOT the Forgotten Realms — it is the original setting "
             f"defined in the CAMPAIGN BIBLE section above. The opening scene MUST take place at "
-            f"the exact STARTING LOCATION already specified there: \"{start_loc.get('name', '')}\". "
-            f"Weave in its opening_hook naturally within the first couple of sentences — do not "
-            f"invent a different location."
+            f"the exact location already specified there: \"{opening_location['name']}\" — "
+            f"{opening_location.get('description', '')}. Weave the CURRENT MILESTONE's objective "
+            f"naturally into the first couple of sentences — do not invent a different location."
         )
     else:
         location_instruction = (
@@ -1413,20 +1486,36 @@ All monster and location names must be English.
     # ghi chú tương tự trong /chat. region vẫn được chốt/lưu bình thường vì
     # opening_instruction cần nó để đặt bối cảnh mở đầu.
 
-    response = ollama.chat(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": opening_instruction},
-        ],
-        format="json",
-        options=OPTIONS,
-        think=False
+    # Chạy qua executor thay vì gọi ollama.chat() trực tiếp — hàm này giờ
+    # cũng được orchestrator tạo campaign mới (main.py) await TRONG lúc
+    # frontend đang poll /setup_status; gọi blocking trực tiếp ở đây sẽ chặn
+    # luôn cả polling đó. Khi gọi từ route /start_game bình thường (request-
+    # response 1 lượt, không cần polling song song) hành vi vẫn đúng y hệt,
+    # chỉ là chạy trên thread pool thay vì thread chính.
+    loop = asyncio.get_running_loop()
+    response = await loop.run_in_executor(
+        _BG_LLM_EXECUTOR,
+        lambda: ollama.chat(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": opening_instruction},
+            ],
+            format="json",
+            options=OPTIONS,
+            think=False,
+        ),
     )
     reply = response["message"]["content"]
 
     result = _parse_dm_json(reply)
     result.setdefault("mechanics", {})
+    # Field nội bộ — opening turn không cần model tự báo cái nào trong số này
+    # (milestone 1 vừa được tạo sẵn, chưa thể complete/act_complete ngay).
+    result["mechanics"].pop("location", None)
+    result["mechanics"].pop("milestone_complete", None)
+    result["mechanics"].pop("milestone_outcome_summary", None)
+    result["mechanics"].pop("act_complete", None)
 
     # RAG: nếu scene mở đầu đã giới thiệu quái/NPC/loot ngay lập tức, vẫn phải
     # lưu vào DB — nếu không, lượt /chat kế tiếp sẽ không nhận ra key đó đã tồn tại.
@@ -1434,6 +1523,23 @@ All monster and location names must be English.
     entities.apply_entity_changes(conn, char["id"], result["mechanics"].get("entities"), 0)
     entities.register_loot_drops(conn, char["id"], result["mechanics"].get("loot_dropped"), 0)
     conn.close()
+
+    # Context panel: cảnh mở đầu = location của milestone 1 -> ghi text ngay
+    # (đồng bộ, rẻ) rồi generate ảnh bất đồng bộ (KHÔNG await) — tái dùng
+    # đúng imagegen.ensure_context_image() đã build cho tính năng ảnh context.
+    if opening_location.get("name"):
+        conn_ctx = db.get_conn()
+        conn_ctx.execute(
+            "UPDATE character SET context_kind = 'location', context_name = ?, context_desc = ?, "
+            "context_image_path = NULL WHERE id = ?",
+            (opening_location["name"], opening_location.get("description", ""), char["id"]),
+        )
+        conn_ctx.commit()
+        conn_ctx.close()
+        asyncio.create_task(imagegen.ensure_context_image(
+            char["id"], "location", opening_location["name"],
+            opening_location.get("visual_prompt") or opening_location["name"],
+        ))
 
     # Lưu vào DB (bao gồm last_result để /start_game gọi lại sau này resume đúng)
     conn = db.get_conn()

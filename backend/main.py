@@ -1,5 +1,7 @@
+import asyncio
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 # Console Windows mặc định dùng cp1252, không encode được ký tự tiếng Việt
 # (ế, ị, ư...) trong các print(f"[DEBUG] ...") rải khắp codebase -> crash cả
@@ -14,7 +16,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 import db
-from agents import entities, campaign, assistant
+from agents import entities, campaign, milestone, assistant
 from agents import dungeon_master as dm
 
 db.init_db()
@@ -65,44 +67,81 @@ async def get_game():
 
 
 # ---------------------------------------------------------------------------
-# Campaign seed (khung truyện tổng — main goal/plot/npc/monster/boss cho DM
-# bám theo xuyên suốt ván chơi). Người chơi chỉ thấy "theme"; phần còn lại bị
-# giấu khỏi UI, chỉ gắn vào system prompt cho DM đọc (xem agents/campaign.py).
+# Campaign seed (Bible cố định + Milestone sinh dần — xem agents/campaign.py
+# và agents/milestone.py). Người chơi chỉ thấy "theme"; phần còn lại bị giấu
+# khỏi UI, chỉ gắn vào system prompt cho DM đọc.
 # ---------------------------------------------------------------------------
 
 @app.get("/campaign_hooks")
 async def campaign_hooks():
-    """AI chỉ bịa nhanh 5 câu hook (theme), KHÔNG khai triển main_goal/plot/
-    npcs/monsters/boss — phần đó tốn thời gian nên chỉ làm sau khi người chơi
-    đã chọn 1 trong 5 (xem /campaign_seed/expand_hook)."""
+    """AI chỉ bịa nhanh 5 câu hook (theme) để người chơi CHỌN — không khai
+    triển gì thêm ở bước này nữa (không còn nút "Xác nhận kịch bản" riêng).
+    Việc khai triển đầy đủ Campaign Bible + milestone đầu tiên xảy ra SAU khi
+    bấm "Khởi tạo nhân vật", chạy nền qua run_campaign_setup() bên dưới."""
     hooks = campaign.generate_campaign_hooks()
     return {"hooks": hooks}
 
 
-@app.post("/campaign_seed/expand_hook")
-async def campaign_seed_expand_hook(data: dict):
-    """Người chơi đã chọn 1 trong 5 hook do AI gợi ý (bấm 'Xác nhận') -> khai
-    triển ĐÚNG hook đó thành đầy đủ cấu trúc campaign seed."""
-    theme = (data.get("theme") or "").strip()
-    if not theme:
-        return {"error": "Thiếu kịch bản đã chọn."}
-    return campaign.expand_campaign_hook(theme)
-
-
-@app.post("/campaign_seed/expand")
-async def campaign_seed_expand(data: dict):
-    """Người chơi tự viết 1 ý tưởng/theme ngắn -> khai triển thành đúng cấu
-    trúc campaign seed (main_goal/plot/npcs/monsters/boss), bám sát ý tưởng
-    gốc thay vì bịa lạc đề."""
-    text = (data.get("text") or "").strip()
-    if not text:
-        return {"error": "Thiếu nội dung kịch bản."}
-    return campaign.expand_custom_seed(text)
-
-
 # ---------------------------------------------------------------------------
-# Character creation
+# Character creation — bấm 1 nút duy nhất, backend chạy NỀN qua 3 bước (sinh
+# Bible -> sinh milestone 1 -> DM kể cảnh mở đầu + generate ảnh location song
+# song) trong lúc frontend hiện modal tiến trình, poll /setup_status.
 # ---------------------------------------------------------------------------
+
+# ollama.chat() trong campaign.py/milestone.py là lời gọi ĐỒNG BỘ (blocking).
+# run_campaign_setup() PHẢI chạy các bước đó qua executor riêng — nếu gọi
+# trực tiếp trong task nền, sẽ chặn event loop, khiến /setup_status polling
+# bị treo theo (modal đứng hình, phản tác dụng của việc chạy nền).
+_SETUP_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+
+
+def _set_setup_stage(char_id: int, stage: str, error: str = None):
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE character SET setup_stage = ?, setup_error = ? WHERE id = ?",
+        (stage, error, char_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+async def run_campaign_setup(char_id: int, theme: str, mode: str):
+    """Chạy NỀN (asyncio.create_task, không await ở nơi gọi) ngay sau khi
+    character row vừa được tạo. Cập nhật setup_stage từng bước để frontend
+    poll thấy tiến độ thật."""
+    loop = asyncio.get_running_loop()
+    try:
+        if mode == "custom":
+            bible = await loop.run_in_executor(_SETUP_EXECUTOR, campaign.expand_custom_seed, theme)
+        else:
+            bible = await loop.run_in_executor(_SETUP_EXECUTOR, campaign.expand_campaign_hook, theme)
+        campaign.save_campaign_bible(bible)
+        _set_setup_stage(char_id, "milestone")
+
+        target_total = bible["campaign"]["estimated_length"]["target_milestones"]
+        first_ms = await loop.run_in_executor(
+            _SETUP_EXECUTOR, milestone.generate_milestone, bible, "", 0, 1, target_total,
+        )
+        db.save_current_milestone(char_id, first_ms)
+        _set_setup_stage(char_id, "opening")
+
+        await dm.handle_start_game()
+        _set_setup_stage(char_id, "ready")
+    except Exception as e:
+        print(f"[DEBUG] run_campaign_setup lỗi: {e}")
+        _set_setup_stage(char_id, "error", str(e))
+
+
+@app.get("/setup_status")
+async def setup_status():
+    char = db.get_latest_character()
+    if not char:
+        return {"stage": None, "error": None}
+    return {
+        "stage": char["setup_stage"] if "setup_stage" in char.keys() else None,
+        "error": char["setup_error"] if "setup_error" in char.keys() else None,
+    }
+
 
 @app.post("/create_character")
 async def create_character(data: dict):
@@ -114,16 +153,10 @@ async def create_character(data: dict):
     race = data.get("race", "")
     character_class = data.get("class", "")
 
-    campaign_seed = data.get("campaignSeed")
-    campaign_theme = None
-    if isinstance(campaign_seed, dict):
-        campaign_theme = campaign_seed.get("theme")
-        # Campaign Bible được lưu ra file JSON riêng (backend/game-data/
-        # campaign_saves/current_campaign.json) thay vì nhét nguyên khối vào
-        # cột DB — dễ mở lên xem/theo dõi lúc dev/debug hơn hẳn so với đọc 1
-        # cột TEXT lớn trong SQLite. Cột campaign_data trong DB chỉ còn giữ để
-        # đọc ngược các save cũ tạo trước khi có cơ chế file này.
-        campaign.save_campaign_bible(campaign_seed)
+    campaign_theme = (data.get("campaignTheme") or "").strip()
+    campaign_mode = "custom" if data.get("campaignMode") == "custom" else "ai"
+    if not campaign_theme:
+        return {"error": "Thiếu kịch bản phiêu lưu."}
 
     conn = db.get_conn()
     c = conn.cursor()
@@ -142,7 +175,7 @@ async def create_character(data: dict):
             attr_str, attr_dex, attr_con, attr_int, attr_wis, attr_cha,
             hp, max_hp, mana, max_mana, level, xp, xp_target, gold,
             strengths, weaknesses, equipment, skills, items,
-            campaign_theme, campaign_data
+            campaign_theme, setup_stage
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         data.get("name", ""),
@@ -169,13 +202,18 @@ async def create_character(data: dict):
         db._list_json(data.get("skills")),
         db._list_json(data.get("items")),
         campaign_theme,
-        None,  # campaign_data: không còn ghi blob lớn vào DB, xem game-data/campaign_saves/
+        "bible",
     ))
+    char_id = c.lastrowid
 
     conn.commit()
     conn.close()
 
-    return {"status": "ok"}
+    # Bất đồng bộ hoàn toàn — trả response NGAY, frontend mở modal tiến trình
+    # và tự poll /setup_status tới khi stage == "ready"/"error".
+    asyncio.create_task(run_campaign_setup(char_id, campaign_theme, campaign_mode))
+
+    return {"status": "started"}
 
 
 @app.get("/character_info")
