@@ -212,8 +212,28 @@ function recalcAndRender(){
   byId('preview-class').textContent = race && cls
     ? `${race.name} · ${cls.name}${state.gender ? ' · ' + state.gender : ''}`
     : 'Chưa có chủng tộc · chức nghiệp';
-  byId('avatar-race').textContent = race ? race.icon : '🧑';
-  byId('avatar-class').textContent = cls ? cls.icon : '🛡️';
+  renderRaceAvatar(byId('avatar-race'), race, state.gender);
+  renderClassAvatar(byId('avatar-class'), cls);
+}
+
+/* Ảnh chân dung theo tộc + giới tính (nếu có) — fallback về emoji icon khi
+   chưa chọn tộc/giới tính hoặc tộc đó chưa có ảnh (vd tộc tuỳ biến). */
+function renderRaceAvatar(el, race, gender){
+  const src = race && (gender === 'Nữ' ? race.avatarFemale : race.avatarMale);
+  if (src){
+    el.innerHTML = `<img src="${src}" alt="${race.name}">`;
+  } else {
+    el.textContent = race ? race.icon : '🧑';
+  }
+}
+
+/* Huy hiệu chức nghiệp (nếu có ảnh) — fallback về emoji icon. */
+function renderClassAvatar(el, cls){
+  if (cls && cls.avatar){
+    el.innerHTML = `<img src="${cls.avatar}" alt="${cls.name}">`;
+  } else {
+    el.textContent = cls ? cls.icon : '🛡️';
+  }
 }
 
 /* ---------------------------- LOADOUT RANDOMIZATION ------------------------ */

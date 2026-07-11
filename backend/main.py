@@ -24,15 +24,26 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 app.mount("/static", StaticFiles(directory="../"), name="static")
 
 
+_CACHEABLE_STATIC_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".woff", ".woff2", ".otf", ".ttf")
+
+
 @app.middleware("http")
 async def no_cache_for_api(request: Request, call_next):
     """Chặn browser/proxy cache cho toàn bộ API JSON (GET /start_game,
     /character_info, POST /chat...). Đây là nguyên nhân phổ biến nhất khiến
     'choices bị cache' — GET request không có Cache-Control sẽ bị trình
     duyệt tự cache và trả lại y hệt response cũ dù server đã có state mới,
-    đặc biệt rõ với /start_game vì URL không đổi giữa các lần gọi."""
+    đặc biệt rõ với /start_game vì URL không đổi giữa các lần gọi.
+
+    /static cũng KHÔNG được loại trừ hoàn toàn nữa: .js/.css/.html sửa xong
+    là phải thấy ngay (không cache), chỉ ảnh/font mới thật sự nên cache lâu
+    (nội dung không đổi theo code)."""
     response = await call_next(request)
-    if not request.url.path.startswith("/static"):
+    is_long_lived_static = (
+        request.url.path.startswith("/static")
+        and request.url.path.lower().endswith(_CACHEABLE_STATIC_EXT)
+    )
+    if not is_long_lived_static:
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"

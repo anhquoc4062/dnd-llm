@@ -347,23 +347,29 @@ html, body{
 }
 .avatar-wrap{
   position: relative;
-  width: 74px;
+  width: 100px;
   margin: 0 auto 12px;
 }
 .avatar{
-  width: 74px; height:74px;
+  width: 100px; height:100px;
   display:flex; align-items:center; justify-content:center;
   font-size: 34px;
   background: radial-gradient(circle, rgba(202,164,86,0.18), transparent 70%);
   border: 1px solid var(--gold);
   border-radius: 50%;
+  overflow: hidden;
+}
+.avatar img{
+  width: 100%; height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
 }
 .avatar-class{
   position: absolute;
-  right: -8px;
-  bottom: -6px;
-  width: 34px; height:34px;
-  font-size: 16px;
+  right: -24px;
+  bottom: -11px;
+  width: 50px;
+  height: 50px;
   background: radial-gradient(circle, rgba(202,164,86,0.28), var(--panel-2) 70%);
   box-shadow: 0 0 0 3px var(--panel);
 }

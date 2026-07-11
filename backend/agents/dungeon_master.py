@@ -17,6 +17,14 @@ ATTR_LABELS = {
     "int": "INT/Trí tuệ", "wis": "WIS/Khôn ngoan", "cha": "CHA/Sức hút",
 }
 
+# Milestone bị "kẹt" (model không tự báo milestone_complete dù nội dung đã đủ
+# điều kiện) từng khiến 1 campaign đứng yên ở milestone đầu tiên suốt 50+ lượt
+# -> câu chuyện lặp lại nhàm chán và chỉ còn biết spam quái làm "sự kiện" lấp
+# đầy turn_note ép buộc bên dưới. Hai ngưỡng này là van an toàn: SOFT chỉ nhắc
+# mạnh hơn, HARD ép backend tự chuyển milestone kể cả model không tự báo.
+MILESTONE_SOFT_STUCK_TURNS = 12
+MILESTONE_HARD_STUCK_TURNS = 22
+
 # Thưởng XP/gold khi giết quái — code tự tính theo tier (suy từ max_hp), không
 # để model tự quyết (trước đây model lúc cộng xp lúc quên, không nhất quán).
 # Ngưỡng max_hp -> (xp, gold dice), tier tăng dần.
@@ -36,6 +44,49 @@ def _monster_kill_reward(max_hp) -> dict:
             gold = classification.roll_dice(gold_dice)["total"]
             return {"xp": xp, "gold": gold}
     return {"xp": 250, "gold": 0}
+
+
+# Số lượt story gần nhất xét tới khi tìm bế tắc hội thoại, và ngưỡng số lượt
+# (trong đó) mà 1 NPC bị nhắc tới liên tục mới coi là "quanh quẩn không lối
+# thoát". difflib so toàn đoạn văn KHÔNG đủ nhạy cho kiểu bế tắc này — model
+# đổi câu chữ mỗi lượt (khác hẳn nhau về mặt ký tự) trong khi vẫn giữ nguyên
+# KẾT CỤC (NPC từ chối/lảng tránh, không ai tiến triển gì) — nên dấu hiệu
+# đáng tin hơn nhiều là: 1 cái tên NPC cụ thể cứ xuất hiện liên tục trong
+# story text nhiều lượt liền, bất kể câu chữ quanh nó thế nào.
+_DEADLOCK_LOOKBACK_TURNS = 4
+_DEADLOCK_MIN_MENTIONS = 3
+
+
+def _detect_dialogue_deadlock(bible: dict | None) -> str | None:
+    """Trả về tên NPC đang gây bế tắc nếu phát hiện (NPC đó bị nhắc tới trong
+    hầu hết story text của vài lượt gần nhất), ngược lại None. Dùng để ép
+    backend buộc model tạo bước ngoặt thật sự thay vì nhắc suông "đừng lặp
+    lại" (vốn không đủ mạnh với model 14B khi nó chỉ đổi câu chữ chứ không
+    đổi tình huống)."""
+    if not bible:
+        return None
+    npc_names = [n.get("name") for n in (bible.get("npcs") or []) if n.get("name")]
+    if not npc_names:
+        return None
+
+    conn = db.get_conn()
+    rows = conn.execute(
+        "SELECT content FROM history WHERE role = 'assistant' ORDER BY id DESC LIMIT ?",
+        (_DEADLOCK_LOOKBACK_TURNS,),
+    ).fetchall()
+    conn.close()
+    if len(rows) < _DEADLOCK_LOOKBACK_TURNS:
+        return None
+    texts_lower = [(r["content"] or "").lower() for r in rows]
+
+    for name in npc_names:
+        name_lower = name.strip().lower()
+        if not name_lower:
+            continue
+        mentions = sum(1 for t in texts_lower if name_lower in t)
+        if mentions >= _DEADLOCK_MIN_MENTIONS:
+            return name
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -414,9 +465,19 @@ async def handle_chat(data: dict) -> dict:
 
     char_dict = db.character_row_to_dict(char)
     suspicious = _mentions_missing_item(user_input, char_dict)
+    current_turn_before = char["current_turn"] or 0
+
+    conn_pre = db.get_conn()
+    active_entities = [dict(row) for row in entities.get_active_entities(conn_pre, char["id"])]
+    conn_pre.close()
 
     turns_since_event = char["turns_since_event"] or 0
-    force_event = turns_since_event >= 2  # giảm từ 2 xuống 1 — chỉ cho phép đúng 1 lượt "thở"
+    # Ngưỡng nâng từ 2 lên 3 — turns_since_event giờ ĐƯỢC cập nhật thật (xem
+    # cuối hàm, dựa vào mechanics.event_occurred model trả về), trước đây cột
+    # này không bao giờ được ghi nên force_event luôn = False (chết, vô tác
+    # dụng). Nới ngưỡng lên 1 chút để có chỗ thở, tránh dồn dập ép "sự kiện
+    # lớn" mỗi 2 lượt chồng lên guard chống spam quái bên dưới.
+    force_event = turns_since_event >= 3
 
     turn_note = f"[STATE] turns_since_major_event={turns_since_event}."
     if force_event:
@@ -432,6 +493,26 @@ async def handle_chat(data: dict) -> dict:
                     "before resolving. If not owned, success MUST be false and the character "
                     "must suffer a penalty for hesitating (e.g. HP loss from being struck).")
 
+    # --- Guard chống spam quái: 1 quái thù địch MỚI vừa xuất hiện trong lượt
+    # này/lượt trước -> cấm sinh thêm quái mới, bắt buộc phải khai triển/giải
+    # quyết con vừa xuất hiện trước. Trước đây không có guard này -> có lúc 3
+    # quái MỚI xuất hiện liên tiếp trong 3-4 lượt (vd Erased One turn 30/32/33,
+    # Memory Wraith turn 44/45/46 trong 1 lần chơi thật) mà không con nào được
+    # giải quyết xong, gây cảm giác "đi xíu là gặp quái liên tục".
+    recent_hostile_spawns = [
+        e for e in active_entities
+        if e.get("entity_type") == "monster" and e.get("hostile")
+        and db.safe_int(e.get("first_seen_turn"), -99) >= current_turn_before - 1
+    ]
+    if recent_hostile_spawns:
+        recent_names = ", ".join(e["name"] for e in recent_hostile_spawns)
+        turn_note += (
+            f" PACING GUARD: {recent_names} vừa xuất hiện rất gần đây — KHÔNG được sinh thêm "
+            f"quái thù địch MỚI nào trong lượt này. Hãy khai triển/giải quyết mối đe doạ hiện "
+            f"có (giao chiến, để nó bỏ chạy, dùng đối thoại/môi trường) thay vì chồng thêm quái "
+            f"mới, trừ khi hành động của người chơi chủ động tìm kiếm nguy hiểm mới."
+        )
+
     # Nhắc lại roster quái của campaign NGAY SÁT cuối context (gần chỗ model
     # sắp sinh ra entity mới nhất) — rule đầy đủ đã có trong system prompt
     # (## CAMPAIGN) nhưng nằm quá xa so với lúc model thực sự quyết định
@@ -440,7 +521,7 @@ async def handle_chat(data: dict) -> dict:
     campaign_bible = db._load_campaign_bible(char)
     if campaign_bible:
         roster_names = ", ".join(campaign.monster_roster_names(campaign_bible))
-        if roster_names:
+        if roster_names and not recent_hostile_spawns:
             turn_note += (
                 f" REMINDER: if a NEW hostile monster must appear THIS turn, it MUST be one of "
                 f"the campaign's MONSTER ROSTER: {roster_names} — reuse its exact "
@@ -448,6 +529,87 @@ async def handle_chat(data: dict) -> dict:
                 f"NOT invent a generic/unrelated monster name (e.g. \"Shadow Entity\", \"Shrouded "
                 f"Figure\") when one of these already fits the scene."
             )
+
+    # --- Van an toàn milestone bị kẹt: model 14B hay quên tự báo
+    # mechanics.milestone_complete dù nội dung đã thoả điều kiện -> campaign
+    # đứng yên hàng chục lượt, hết chuyện để kể nên chỉ còn biết lặp
+    # thoại/spam quái làm "nội dung". SOFT nhắc mạnh hơn; HARD ép backend tự
+    # chuyển milestone (không đợi model tự giác nữa) và reload lại `char` để
+    # phần build_system_prompt() phía dưới thấy đúng milestone mới.
+    if campaign_bible:
+        nb_check = campaign._normalize_bible(campaign_bible)
+        milestones_check = nb_check["story_milestones"]
+        total_m = len(milestones_check)
+        idx = max(0, min(
+            char["campaign_milestone_index"] if "campaign_milestone_index" in char.keys() else 0,
+            total_m - 1,
+        ))
+        milestone_advanced_turn = char["milestone_advanced_turn"] if "milestone_advanced_turn" in char.keys() else 0
+        turns_stuck = current_turn_before - (milestone_advanced_turn or 0)
+        is_finale_milestone = idx >= total_m - 1
+
+        if not is_finale_milestone and turns_stuck >= MILESTONE_HARD_STUCK_TURNS:
+            new_idx = min(idx + 1, total_m - 1)
+            conn_ms = db.get_conn()
+            conn_ms.execute(
+                "UPDATE character SET campaign_milestone_index = ?, milestone_advanced_turn = ? WHERE id = ?",
+                (new_idx, current_turn_before, char["id"]),
+            )
+            conn_ms.commit()
+            conn_ms.close()
+            print(f"[DEBUG] milestone kẹt {turns_stuck} lượt -> ép chuyển {idx} -> {new_idx}")
+            char = db.get_latest_character()  # reload để build_system_prompt() thấy milestone mới
+            next_title = milestones_check[new_idx]["title"]
+            turn_note += (
+                f" STORY PIVOT: enough time has passed on the previous plot thread — THIS turn, "
+                f"wrap up/resolve the current scene quickly (a clue lands, a door opens, the "
+                f"threat is dealt with) and pivot the narrative toward the next story beat: "
+                f"\"{next_title}\". Do not stall further on the old thread."
+            )
+        elif not is_finale_milestone and turns_stuck >= MILESTONE_SOFT_STUCK_TURNS:
+            current_ms = milestones_check[idx]
+            turn_note += (
+                f" PACING: {turns_stuck} turns have passed without completing the current "
+                f"milestone (\"{current_ms['title']}\" — {current_ms['description']}). Actively "
+                f"steer this turn's events toward satisfying it — introduce the key clue/turn/"
+                f"NPC action that resolves it, rather than another side detour. Set "
+                f"mechanics.milestone_complete=true as soon as it's genuinely satisfied."
+            )
+
+    # Nhắc chống lặp thoại/prose ở NGAY SÁT cuối context (recency) — rule đầy
+    # đủ đã có trong system prompt (## SCENE CONTINUITY) nhưng nằm quá xa nên
+    # model nhỏ (14B) hay quên, dẫn tới lặp gần y hệt 1 câu thoại nhiều lượt
+    # liên tiếp (vd NPC từ chối tiết lộ bằng đúng 1 câu 3 lượt liền trong 1
+    # lần chơi thật).
+    turn_note += (
+        " ANTI-REPETITION: if this turn's scene/dialogue would closely restate content, "
+        "phrasing, or a refusal already given in the last 2-3 turns, you MUST make it "
+        "meaningfully different this time (new detail, changed reaction, escalation, or an "
+        "explicit refusal-with-a-reason) — never reuse near-identical lines turn after turn."
+    )
+
+    # --- Phá bế tắc hội thoại: nhắc suông ANTI-REPETITION ở trên không đủ với
+    # model 14B — nó vẫn có thể đổi câu chữ mỗi lượt nhưng giữ nguyên KẾT CỤC
+    # (vd 1 NPC luôn kết thúc bằng "tôi không thể nói gì thêm" dù người chơi
+    # đổi chiến thuật, đe doạ, dùng vật phẩm...). _detect_dialogue_deadlock()
+    # bắt đúng kiểu lặp này bằng cách đếm tần suất 1 NPC bị nhắc liên tục
+    # trong story text, thay vì so độ giống câu chữ (vốn luôn thấp vì model
+    # đổi cách diễn đạt mỗi lượt). Khi phát hiện, ép buộc CỨNG: lượt này BẮT
+    # BUỘC phải có bước ngoặt thật, chỉ đích danh NPC đó để model không né.
+    deadlock_npc = _detect_dialogue_deadlock(campaign_bible)
+    if deadlock_npc:
+        turn_note += (
+            f" BREAKTHROUGH REQUIRED: the last several turns have circled the same standoff with "
+            f"\"{deadlock_npc}\" without real progress (same refusal/deflection outcome even if "
+            f"worded differently each time). THIS turn MUST break the deadlock decisively — pick "
+            f"ONE: (a) \"{deadlock_npc}\" finally cracks and reveals a concrete, specific piece of "
+            f"information (even if partial/cryptic, it must give the player something new to act "
+            f"on), or (b) an external event forcibly interrupts/ends this standoff (someone else "
+            f"arrives, \"{deadlock_npc}\" is taken/killed/flees for good, the location becomes "
+            f"unsafe) so the player must move on to a different approach. Under NO circumstances "
+            f"repeat another vague refusal, interruption-without-payoff, or stalling non-answer "
+            f"this turn — this is the LAST turn this standoff is allowed to continue unresolved."
+        )
 
     # --- Call 1: classify (module classification.py) ---
     prev_result_raw = char["last_result"] if "last_result" in char.keys() else None
@@ -457,10 +619,6 @@ async def handle_chat(data: dict) -> dict:
             known_choices = json.loads(prev_result_raw).get("choices")
         except (TypeError, json.JSONDecodeError, AttributeError):
             known_choices = None
-
-    conn_pre = db.get_conn()
-    active_entities = [dict(row) for row in entities.get_active_entities(conn_pre, char["id"])]
-    conn_pre.close()
 
     class_result = classification.classify_action(
         MODEL, OPTIONS, user_input, char_dict, known_choices=known_choices,
@@ -852,6 +1010,7 @@ async def handle_chat(data: dict) -> dict:
     # này khỏi mechanics trả về frontend — chỉ là tín hiệu nội bộ, không phải
     # thứ người chơi cần thấy.
     milestone_complete = bool(result["mechanics"].pop("milestone_complete", False))
+    milestone_advanced_this_turn = False
     if milestone_complete and not result["mechanics"].get("character_died"):
         bible_for_progress = db._load_campaign_bible(char)
         if bible_for_progress:
@@ -861,10 +1020,23 @@ async def handle_chat(data: dict) -> dict:
             if new_index != current_index:
                 conn = db.get_conn()
                 c = conn.cursor()
-                c.execute("UPDATE character SET campaign_milestone_index = ? WHERE id = ?", (new_index, char["id"]))
+                c.execute(
+                    "UPDATE character SET campaign_milestone_index = ?, milestone_advanced_turn = ? WHERE id = ?",
+                    (new_index, turn_number, char["id"]),
+                )
                 conn.commit()
                 conn.close()
+                milestone_advanced_this_turn = True
                 print(f"[DEBUG] milestone_complete=true -> campaign_milestone_index {current_index} -> {new_index}")
+
+    # --- turns_since_event: đếm số lượt liên tiếp KHÔNG có "sự kiện lớn" (theo
+    # mechanics.event_occurred model tự báo) -> dùng để ép force_event ở đầu
+    # hàm lượt sau. Cột này trước đây không bao giờ được ghi (luôn = 0 chết
+    # cứng) khiến force_event vô tác dụng — giờ mới thực sự wiring theo đúng
+    # thiết kế ban đầu. Milestone vừa tiến cũng tính là 1 "sự kiện lớn" (reset
+    # về 0), vì bản thân việc đó đã đủ nặng đô cho lượt này.
+    event_occurred = bool(result["mechanics"].get("event_occurred", False)) or milestone_advanced_this_turn
+    new_turns_since_event = 0 if event_occurred else (char["turns_since_event"] or 0) + 1
 
     conn = db.get_conn()
     c = conn.cursor()
@@ -877,8 +1049,8 @@ async def handle_chat(data: dict) -> dict:
         (result.get("story", ""), turn_number),
     )
     c.execute(
-        "UPDATE character SET last_result = ?, current_turn = ? WHERE id = ?",
-        (json.dumps(result, ensure_ascii=False), turn_number, char["id"]),
+        "UPDATE character SET last_result = ?, current_turn = ?, turns_since_event = ? WHERE id = ?",
+        (json.dumps(result, ensure_ascii=False), turn_number, new_turns_since_event, char["id"]),
     )
     conn.commit()
     conn.close()

@@ -71,11 +71,11 @@ def init_db():
     # Cho phép nâng cấp DB cũ (được tạo trước khi có race_en/character_class_en)
     # mà không cần xoá file game.db thủ công.
     existing_cols = {row["name"] for row in c.execute("PRAGMA table_info(character)")}
-    int_cols_default_0 = ("turns_since_event", "weather_since_turn", "current_turn", "summarized_up_to_turn", "campaign_milestone_index")
+    int_cols_default_0 = ("turns_since_event", "weather_since_turn", "current_turn", "summarized_up_to_turn", "campaign_milestone_index", "milestone_advanced_turn")
     for col in ("race_en", "character_class_en", "turns_since_event", "region", "npc_pool",
                 "last_result", "weather", "weather_since_turn", "current_turn",
                 "history_summary", "summarized_up_to_turn", "campaign_theme", "campaign_data",
-                "campaign_milestone_index", "pre_turn_snapshot"):
+                "campaign_milestone_index", "pre_turn_snapshot", "milestone_advanced_turn"):
         if col not in existing_cols:
             if col in int_cols_default_0:
                 c.execute(f"ALTER TABLE character ADD COLUMN {col} INTEGER DEFAULT 0")

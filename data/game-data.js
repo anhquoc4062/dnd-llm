@@ -16,14 +16,14 @@
 const ATTR_KEYS = ['str', 'dex', 'con', 'int', 'wis', 'cha'];
 /* ---------------------------- CHỦNG TỘC --------------------------------- */
 const RACES = [
-  { key: 'human', id: 'human', name: 'Con Người', en: 'Human', icon: '🧑', desc: 'Cân bằng, thích nghi tốt với mọi hoàn cảnh.', bonus: { str: 1, dex: 1, con: 1, int: 1, wis: 1, cha: 1 } },
-  { key: 'elf', id: 'elf', name: 'Tiên Tộc', en: 'Elf', icon: '🧝', desc: 'Nhanh nhẹn, thông tuệ nhưng thể chất mảnh khảnh.', bonus: { dex: 3, int: 2, con: -1 } },
-  { key: 'dwarf', id: 'dwarf', name: 'Người Lùn', en: 'Dwarf', icon: '🧔', desc: 'Cường tráng, bền bỉ nhưng chậm chạp.', bonus: { con: 3, str: 2, dex: -1 } },
-  { key: 'orc', id: 'orc', name: 'Orc', en: 'Orc', icon: '👹', desc: 'Sức mạnh cơ bắp vượt trội nhưng kém tinh tế.', bonus: { str: 4, con: 1, int: -2 } },
-  { key: 'halfling', id: 'halfling', name: 'Hobbit', en: 'Halfling', icon: '🍀', desc: 'Lanh lợi, may mắn và khéo ăn khéo nói.', bonus: { dex: 3, cha: 2, str: -2 } },
-  { key: 'tiefling', id: 'tiefling', name: 'Quỷ Tộc', en: 'Tiefling', icon: '😈', desc: 'Mang dòng máu quỷ dữ, quyến rũ nhưng bị nghi kỵ.', bonus: { cha: 3, int: 2, wis: -1 } },
-  { key: 'dragonborn', id: 'dragonborn', name: 'Long Nhân', en: 'Dragonborn', icon: '🐉', desc: 'Hậu duệ rồng thiêng, oai vệ và mạnh mẽ.', bonus: { str: 2, con: 2, cha: 1, dex: -1 } },
-  { key: 'gnome', id: 'gnome', name: 'Gnome', en: 'Gnome', icon: '🧙', desc: 'Nhỏ bé nhưng cực kỳ thông minh và tò mò.', bonus: { int: 3, dex: 2, str: -2 } },
+  { key: 'human', id: 'human', name: 'Con Người', en: 'Human', icon: '🧑', avatarMale: '/static/data/avatars/human_male.png', avatarFemale: '/static/data/avatars/human_female.png', desc: 'Cân bằng, thích nghi tốt với mọi hoàn cảnh.', bonus: { str: 1, dex: 1, con: 1, int: 1, wis: 1, cha: 1 } },
+  { key: 'elf', id: 'elf', name: 'Tiên Tộc', en: 'Elf', icon: '🧝', avatarMale: '/static/data/avatars/elf_male.png', avatarFemale: '/static/data/avatars/elf_female.png', desc: 'Nhanh nhẹn, thông tuệ nhưng thể chất mảnh khảnh.', bonus: { dex: 3, int: 2, con: -1 } },
+  { key: 'dwarf', id: 'dwarf', name: 'Người Lùn', en: 'Dwarf', icon: '🧔', avatarMale: '/static/data/avatars/dwarf_male.png', avatarFemale: '/static/data/avatars/dwarf_female.png', desc: 'Cường tráng, bền bỉ nhưng chậm chạp.', bonus: { con: 3, str: 2, dex: -1 } },
+  { key: 'orc', id: 'orc', name: 'Orc', en: 'Orc', icon: '👹', avatarMale: '/static/data/avatars/orc_male.png', avatarFemale: '/static/data/avatars/orc_female.png', desc: 'Sức mạnh cơ bắp vượt trội nhưng kém tinh tế.', bonus: { str: 4, con: 1, int: -2 } },
+  { key: 'halfling', id: 'halfling', name: 'Hobbit', en: 'Halfling', icon: '🍀', avatarMale: '/static/data/avatars/halfling_male.png', avatarFemale: '/static/data/avatars/halfling_female.png', desc: 'Lanh lợi, may mắn và khéo ăn khéo nói.', bonus: { dex: 3, cha: 2, str: -2 } },
+  { key: 'tiefling', id: 'tiefling', name: 'Quỷ Tộc', en: 'Tiefling', icon: '😈', avatarMale: '/static/data/avatars/tiefling_male.png', avatarFemale: '/static/data/avatars/tiefling_female.png', desc: 'Mang dòng máu quỷ dữ, quyến rũ nhưng bị nghi kỵ.', bonus: { cha: 3, int: 2, wis: -1 } },
+  { key: 'dragonborn', id: 'dragonborn', name: 'Long Nhân', en: 'Dragonborn', icon: '🐉', avatarMale: '/static/data/avatars/dragonborn_blue.png', avatarFemale: '/static/data/avatars/dragonborn_gold.png', desc: 'Hậu duệ rồng thiêng, oai vệ và mạnh mẽ.', bonus: { str: 2, con: 2, cha: 1, dex: -1 } },
+  { key: 'gnome', id: 'gnome', name: 'Gnome', en: 'Gnome', icon: '🧙', avatarMale: '/static/data/avatars/gnome_male.png', avatarFemale: '/static/data/avatars/gnome_female.png', desc: 'Nhỏ bé nhưng cực kỳ thông minh và tò mò.', bonus: { int: 3, dex: 2, str: -2 } },
   // { key: 'half_orc', id: 'half_orc', name: 'Bán Orc', en: 'Half-Orc', icon: '👺', desc: 'Con lai giữa người và orc, mạnh mẽ nhưng bị kỳ thị.', bonus: { str: 3, con: 2, cha: -1 } },
   // { key: 'half_elf', id: 'half_elf', name: 'Bán Tiên', en: 'Half-Elf', icon: '🧝‍♂️', desc: 'Con lai giữa người và tiên, khéo léo và quyến rũ.', bonus: { cha: 3, dex: 2, int: 1, con: -1 } },
   // { key: 'undead', id: 'undead', name: 'Xác Sống', en: 'Undead', icon: '🧟', desc: 'Sinh vật chết sống lại, miễn nhiễm với bệnh tật nhưng sợ ánh sáng.', bonus: { con: 2, int: 1, cha: -5 } }
@@ -31,57 +31,57 @@ const RACES = [
 /* ---------------------------- CHỨC NGHIỆP -------------------------------- */
 const CLASSES = [
   {
-    key: 'fighter', id: 'fighter', name: 'Chiến Binh', en: 'Fighter', icon: '🗡️',
+    key: 'fighter', id: 'fighter', name: 'Chiến Binh', en: 'Fighter', icon: '🗡️', avatar: '/static/data/avatars/class_fighter.png',
     desc: 'Bậc thầy vũ khí cận chiến, tiên phong trận tuyến.',
     bonus: { str: 3, con: 2 }, hp: 30, mana: 5, xpTarget: 10, manaAttr: 'con'
   },
   {
-    key: 'wizard', id: 'wizard', name: 'Pháp Sư', en: 'Wizard', icon: '🔮',
+    key: 'wizard', id: 'wizard', name: 'Pháp Sư', en: 'Wizard', icon: '🔮', avatar: '/static/data/avatars/class_wizard.png',
     desc: 'Điều khiển ma thuật nguyên thủy qua tri thức.',
     bonus: { int: 4, wis: 1 }, hp: 18, mana: 20, xpTarget: 10, manaAttr: 'int'
   },
   {
-    key: 'rogue', id: 'rogue', name: 'Đạo Tặc', en: 'Rogue', icon: '🗝️',
+    key: 'rogue', id: 'rogue', name: 'Đạo Tặc', en: 'Rogue', icon: '🗝️', avatar: '/static/data/avatars/class_rogue.png',
     desc: 'Ẩn mình trong bóng tối, tung đòn chí mạng.',
     bonus: { dex: 3, cha: 2 }, hp: 22, mana: 8, xpTarget: 10, manaAttr: 'dex'
   },
   {
-    key: 'cleric', id: 'cleric', name: 'Tu Sĩ', en: 'Cleric', icon: '✨',
+    key: 'cleric', id: 'cleric', name: 'Tu Sĩ', en: 'Cleric', icon: '✨', avatar: '/static/data/avatars/class_cleric.png',
     desc: 'Truyền phép thiêng liêng, chữa lành và trừng phạt.',
     bonus: { wis: 4, cha: 1 }, hp: 24, mana: 18, xpTarget: 10, manaAttr: 'wis'
   },
   {
-    key: 'ranger', id: 'ranger', name: 'Thợ Săn', en: 'Ranger', icon: '🏹',
+    key: 'ranger', id: 'ranger', name: 'Thợ Săn', en: 'Ranger', icon: '🏹', avatar: '/static/data/avatars/class_ranger.png',
     desc: 'Thợ săn thiện xạ, thân thuộc thiên nhiên hoang dã.',
     bonus: { dex: 2, wis: 2, con: 1 }, hp: 24, mana: 10, xpTarget: 10, manaAttr: 'wis'
   },
   {
-    key: 'barbarian', id: 'barbarian', name: 'Man Di', en: 'Barbarian', icon: '🪓',
+    key: 'barbarian', id: 'barbarian', name: 'Man Di', en: 'Barbarian', icon: '🪓', avatar: '/static/data/avatars/class_barbarian.png',
     desc: 'Cơn thịnh nộ nguyên thủy, bất chấp mọi đòn đau.',
     bonus: { str: 4, con: 3, int: -1 }, hp: 35, mana: 3, xpTarget: 10, manaAttr: 'con'
   },
   {
-    key: 'paladin', id: 'paladin', name: 'Thánh Kỵ Sĩ', en: 'Paladin', icon: '🛡️',
+    key: 'paladin', id: 'paladin', name: 'Thánh Kỵ Sĩ', en: 'Paladin', icon: '🛡️', avatar: '/static/data/avatars/class_paladin.png',
     desc: 'Chiến binh thề nguyện phụng sự ánh sáng, vừa đánh vừa chữa.',
     bonus: { str: 2, wis: 2, cha: 1 }, hp: 28, mana: 12, xpTarget: 10, manaAttr: 'wis'
   },
   {
-    key: 'warlock', id: 'warlock', name: 'Warlock', en: 'Warlock', icon: '🔮',
+    key: 'warlock', id: 'warlock', name: 'Warlock', en: 'Warlock', icon: '🔮', avatar: '/static/data/avatars/class_warlock.png',
     desc: 'Kết nối với sức mạnh siêu nhiên, sử dụng phép thuật để tấn công và hỗ trợ.',
     bonus: { cha: 4, int: 2 }, hp: 22, mana: 16, xpTarget: 10, manaAttr: 'cha'
   },
   {
-    key: 'bard', id: 'bard', name: 'Bard', en: 'Bard', icon: '🎵',
+    key: 'bard', id: 'bard', name: 'Bard', en: 'Bard', icon: '🎵', avatar: '/static/data/avatars/class_bard.png',
     desc: 'Nghệ sĩ âm nhạc, sử dụng âm thanh và lời ca để ảnh hưởng đến người khác.',
     bonus: { cha: 3, dex: 2 }, hp: 20, mana: 14, xpTarget: 10, manaAttr: 'cha'
   },
   {
-    key: 'druid', id: 'druid', name: 'Druid', en: 'Druid', icon: '🌿',
+    key: 'druid', id: 'druid', name: 'Druid', en: 'Druid', icon: '🌿', avatar: '/static/data/avatars/class_druid.png',
     desc: 'Người bảo vệ thiên nhiên, có khả năng biến hóa và sử dụng sức mạnh của đất đai.',
     bonus: { wis: 3, con: 2 }, hp: 24, mana: 12, xpTarget: 10, manaAttr: 'wis'
   },
-  {key: 'monk', id: 'monk', name: 'Thầy Tu', en: 'Monk', icon: '🥋', desc: 'Chiến binh tinh thần, sử dụng kỹ thuật chiến đấu và năng lượng nội tại.', bonus: { dex: 3, wis: 2 }, hp: 22, mana: 10, xpTarget: 10, manaAttr: 'wis'},
-  {key: 'sorcerer', id: 'sorcerer', name: 'Phù Thủy', en: 'Sorcerer', icon: '🔥', desc: 'Người sử dụng ma thuật bẩm sinh, có khả năng triệu hồi và điều khiển các yếu tố.', bonus: { cha: 4, int: 1 }, hp: 20, mana: 18, xpTarget: 10, manaAttr: 'cha'},
+  {key: 'monk', id: 'monk', name: 'Thầy Tu', en: 'Monk', icon: '🥋', avatar: '/static/data/avatars/class_monk.png', desc: 'Chiến binh tinh thần, sử dụng kỹ thuật chiến đấu và năng lượng nội tại.', bonus: { dex: 3, wis: 2 }, hp: 22, mana: 10, xpTarget: 10, manaAttr: 'wis'},
+  {key: 'sorcerer', id: 'sorcerer', name: 'Phù Thủy', en: 'Sorcerer', icon: '🔥', avatar: '/static/data/avatars/class_sorcerer.png', desc: 'Người sử dụng ma thuật bẩm sinh, có khả năng triệu hồi và điều khiển các yếu tố.', bonus: { cha: 4, int: 1 }, hp: 20, mana: 18, xpTarget: 10, manaAttr: 'cha'},
 ];
 /* ---------------------------- ĐIỂM MẠNH / YẾU ---------------------------- */
 const STRENGTH_POOL = [
