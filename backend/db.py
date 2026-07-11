@@ -75,7 +75,9 @@ def init_db():
     for col in ("race_en", "character_class_en", "turns_since_event", "region", "npc_pool",
                 "last_result", "weather", "weather_since_turn", "current_turn",
                 "history_summary", "summarized_up_to_turn", "campaign_theme", "campaign_data",
-                "campaign_milestone_index", "pre_turn_snapshot", "milestone_advanced_turn"):
+                "campaign_milestone_index", "pre_turn_snapshot", "milestone_advanced_turn",
+                "pending_action", "last_turn_resolution",
+                "context_kind", "context_name", "context_desc", "context_image_path"):
         if col not in existing_cols:
             if col in int_cols_default_0:
                 c.execute(f"ALTER TABLE character ADD COLUMN {col} INTEGER DEFAULT 0")

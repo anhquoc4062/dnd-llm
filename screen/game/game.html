@@ -16,6 +16,22 @@
 
 <div id="layout">
 
+  <!-- ============ CONTEXT (ảnh location/quái/NPC mới nhất) ============ -->
+  <div id="context-panel">
+    <div class="context-sheet">
+      <div id="context-image-wrap" class="context-image-wrap">
+        <img id="context-image" class="context-image hidden" alt="">
+        <div id="context-placeholder" class="context-placeholder hidden">
+          <span class="context-spinner"></span>
+          <span>Đang dựng hình…</span>
+        </div>
+      </div>
+      <div id="context-empty" class="context-empty">Chưa có bối cảnh nào được ghi nhận.</div>
+      <h3 id="context-name" class="context-name hidden"></h3>
+      <p id="context-desc" class="context-desc hidden"></p>
+    </div>
+  </div>
+
   <!-- ============ GAME ============ -->
   <div id="game-panel">
 
@@ -122,6 +138,29 @@
   <div id="assistant-input-row">
     <input type="text" id="assistant-input" placeholder="Ví dụ: Người đàn ông bí ẩn đó là ai?">
     <button id="assistant-send-btn">Hỏi</button>
+  </div>
+</div>
+
+<!-- ============ POPUP TUNG XÚC XẮC ============ -->
+<div id="dice-modal-overlay" class="dice-modal-overlay hidden">
+  <div class="dice-modal">
+    <div class="dice-modal-header">
+      <span id="dice-roll-badge" class="choice-roll"></span>
+      <span id="dice-dc-label" class="choice-dc"></span>
+    </div>
+
+    <div id="dice-stage" class="dice-stage">
+      <div class="die" id="die-1">?</div>
+      <div class="die hidden" id="die-2">?</div>
+    </div>
+
+    <div id="dice-result" class="dice-result hidden">
+      <div id="dice-result-banner" class="dice-result-banner"></div>
+      <div id="dice-result-detail" class="dice-result-detail"></div>
+    </div>
+
+    <button type="button" id="dice-roll-btn" class="dice-roll-btn">🎲 Tung xúc xắc</button>
+    <button type="button" id="dice-continue-btn" class="dice-continue-btn hidden">Tiếp tục</button>
   </div>
 </div>
 

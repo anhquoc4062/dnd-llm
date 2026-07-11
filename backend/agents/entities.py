@@ -182,11 +182,19 @@ def format_entities_context(conn: sqlite3.Connection, character_id: int) -> str:
 
 def apply_entity_changes(conn: sqlite3.Connection, character_id: int, entities_payload, turn_number: int):
     """entities_payload: list of dicts, mỗi dict có thể là:
-    - Entity MỚI: {"key", "name", "type", "max_hp", "hp", "hostile"}
+    - Entity MỚI: {"key", "name", "type", "max_hp", "hp", "hostile", "description"(optional),
+      "visual_prompt"(optional) — 2 field sau chỉ dùng để trigger generate ảnh context
+      panel ở dungeon_master.py, KHÔNG lưu vào bảng entity (bảng chỉ giữ số liệu chiến đấu)}
     - Entity ĐÃ CÓ: {"key", "hp_change", "status"(optional)}
-    Tự phân biệt bằng cách tra key đã tồn tại trong DB chưa."""
+    Tự phân biệt bằng cách tra key đã tồn tại trong DB chưa.
+
+    Trả về new_entities: list các entity vừa đi qua nhánh INSERT (mới xuất hiện
+    lần đầu lượt này) — dùng để dungeon_master.py biết có quái/NPC mới cần
+    generate ảnh context, tránh generate lại mỗi lần entity đó xuất hiện lại
+    trong active_entities ở các lượt sau."""
+    new_entities = []
     if not entities_payload:
-        return
+        return new_entities
 
     c = conn.cursor()
     for item in entities_payload:
@@ -235,7 +243,15 @@ def apply_entity_changes(conn: sqlite3.Connection, character_id: int, entities_p
                 (character_id, key, name, entity_type, hp, max_hp, ac, attack_bonus, damage_dice,
                  hostile, turn_number, turn_number, gender),
             )
+            new_entities.append({
+                "key": key,
+                "name": name,
+                "entity_type": entity_type,
+                "description": (item.get("description") or "").strip(),
+                "visual_prompt": (item.get("visual_prompt") or "").strip(),
+            })
     conn.commit()
+    return new_entities
 
 
 def register_loot_drops(conn: sqlite3.Connection, character_id: int, loot_payload, turn_number: int):

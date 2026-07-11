@@ -47,17 +47,20 @@ html, body{
 /* ---------------------------- Layout ---------------------------- */
 
 #layout{
-  max-width: 1280px;
+  width: 100%;
   margin: 0 auto;
   padding: 28px 24px 40px;
   display: grid;
-  grid-template-columns: 1.6fr 1fr;
+  grid-template-columns: 320px 1fr 320px;
   gap: 24px;
   min-height: 100vh;
 }
-@media (max-width: 960px){
+@media (max-width: 1000px){
+  /* Context ảnh trên cùng, chat ở giữa, nhân vật xuống cuối — đúng thứ tự
+     xuất hiện trong DOM, không cần override `order`. Ngưỡng hạ xuống 1000px
+     (thay vì 1280px) vì giờ 2 panel bên cố định 320px, không còn co giãn
+     theo %, nên vẫn đủ chỗ thoải mái ở độ phân giải laptop phổ biến. */
   #layout{ grid-template-columns: 1fr; }
-  #character-panel{ order: -1; }
 }
 
 /* ---------------------------- Game panel ---------------------------- */
@@ -193,16 +196,13 @@ html, body{
 }
 
 #choices-container{
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 14px;
-}
-#choices-container{
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 10px;
   margin-bottom: 14px;
+}
+@media (max-width: 640px){
+  #choices-container{ grid-template-columns: 1fr; }
 }
 
 .choice-btn{
@@ -553,6 +553,99 @@ li.cooldown {
   color: var(--ember-bright) !important;
 }
 
+/* ---------------------------- Context panel (ảnh scene) ---------------------------- */
+
+#context-panel{ display: flex; }
+.context-sheet{
+  position: sticky;
+  top: 24px;
+  width: 100%;
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 0 0 1px rgba(202,164,86,0.06), 0 20px 40px rgba(0,0,0,0.35);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+
+.context-image-wrap{
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 2;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  margin-bottom: 14px;
+}
+.context-image{
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.context-image.hidden{ display: none; }
+
+.context-placeholder{
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  background:
+    linear-gradient(110deg, transparent 40%, rgba(202,164,86,0.08) 50%, transparent 60%),
+    var(--bg);
+  background-size: 200% 100%;
+  animation: context-shimmer 1.6s linear infinite;
+}
+.context-placeholder.hidden{ display: none; }
+
+.context-spinner{
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  border-top-color: var(--gold);
+  animation: context-spin 0.8s linear infinite;
+}
+
+@keyframes context-shimmer{
+  0%{ background-position: 200% 0; }
+  100%{ background-position: -200% 0; }
+}
+@keyframes context-spin{
+  to{ transform: rotate(360deg); }
+}
+
+.context-empty{
+  font-size: 13px;
+  color: var(--muted);
+  text-align: center;
+  padding: 20px 0;
+}
+.context-empty.hidden{ display: none; }
+
+.context-name{
+  font-family: var(--font-display);
+  font-size: 18px;
+  color: var(--gold-bright);
+  margin: 0 0 8px;
+}
+.context-name.hidden{ display: none; }
+
+.context-desc{
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--parchment-dim);
+  margin: 0;
+}
+.context-desc.hidden{ display: none; }
+
 /* --- Changes log (nhật ký thay đổi) --- */
 .msg.log{
   align-self: flex-start;
@@ -821,6 +914,124 @@ li.cooldown {
 }
 #assistant-send-btn:hover{ background: var(--gold-bright); }
 #assistant-send-btn:disabled{ opacity: 0.5; cursor: not-allowed; }
+
+/* ---------------------------- Popup tung xúc xắc ---------------------------- */
+
+.dice-modal-overlay{
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(8,6,4,0.72);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+.dice-modal-overlay.hidden{ display: none; }
+
+.dice-modal{
+  width: 100%; max-width: 380px;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 24px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  text-align: center;
+}
+
+.dice-modal-header{
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.dice-modal-header .choice-roll.hidden{ display: none; }
+
+.dice-stage{
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-bottom: 20px;
+  min-height: 84px;
+}
+
+/* Hình xúc xắc 20 mặt (icosahedron) cách điệu 2D: viền lục giác dẹt (2 đỉnh
+   trên/dưới) + đường vân tam giác mô phỏng các mặt cắt kim cương, giống icon
+   d20 quen thuộc trong các app D&D thay vì 1 ô vuông bo góc thường. */
+.die{
+  --d20-shape: polygon(50% 2%, 93% 26%, 93% 74%, 50% 98%, 7% 74%, 7% 26%);
+  width: 78px; height: 84px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 26px;
+  font-weight: 800;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at 32% 18%, rgba(255,255,255,0.55), transparent 50%),
+    linear-gradient(155deg, var(--gold-bright) 0%, var(--gold) 55%, #9c7a3a 100%);
+  border: 2px solid var(--gold-bright);
+  clip-path: var(--d20-shape);
+  position: relative;
+  filter: drop-shadow(0 3px 6px rgba(202,164,86,0.35));
+}
+.die::before{
+  /* Vân mặt cắt: 1 điểm tụ giữa toả ra 6 đỉnh của lục giác, giống lưới facet
+     của khối icosahedron thật. */
+  content: '';
+  position: absolute; inset: 0;
+  clip-path: var(--d20-shape);
+  background:
+    linear-gradient(90deg, transparent calc(50% - 1px), rgba(23,19,16,0.28) 50%, transparent calc(50% + 1px)),
+    linear-gradient(150deg, transparent calc(50% - 1px), rgba(23,19,16,0.2) 50%, transparent calc(50% + 1px)),
+    linear-gradient(30deg, transparent calc(50% - 1px), rgba(23,19,16,0.2) 50%, transparent calc(50% + 1px));
+  pointer-events: none;
+}
+.die.hidden{ display: none; }
+.die.spinning{ animation: dice-spin 0.5s linear infinite; }
+.die.taken{
+  border-color: var(--sage-bright);
+  filter: drop-shadow(0 0 8px rgba(122,154,99,0.6));
+}
+.die.discarded{ opacity: 0.45; filter: grayscale(75%) drop-shadow(0 3px 6px rgba(0,0,0,0.3)); }
+
+@keyframes dice-spin{
+  0%{ transform: rotate(0deg) scale(1); }
+  50%{ transform: rotate(180deg) scale(1.05); }
+  100%{ transform: rotate(360deg) scale(1); }
+}
+
+.dice-result{ margin-bottom: 18px; }
+.dice-result.hidden{ display: none; }
+
+.dice-result-banner{
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 700;
+  padding: 8px 0;
+}
+.dice-result-banner.success{ color: var(--sage-bright); }
+.dice-result-banner.fail{ color: var(--ember-bright); }
+
+.dice-result-detail{
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.dice-roll-btn, .dice-continue-btn{
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  padding: 12px 24px;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  width: 100%;
+  background: var(--gold);
+  color: var(--ink);
+  transition: background .15s ease;
+}
+.dice-roll-btn:hover, .dice-continue-btn:hover{ background: var(--gold-bright); }
+.dice-roll-btn:disabled{ opacity: 0.6; cursor: not-allowed; }
+.dice-roll-btn.hidden, .dice-continue-btn.hidden{ display: none; }
 
 @media (max-width: 480px){
   #assistant-panel{ right: 12px; left: 12px; width: auto; bottom: 84px; }

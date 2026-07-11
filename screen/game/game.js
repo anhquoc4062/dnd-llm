@@ -248,6 +248,16 @@ function setInputsEnabled(enabled){
   byId('choices-container').querySelectorAll('.choice-btn').forEach(b => b.disabled = !enabled);
 }
 
+/**
+ * 1 lượt hành động giờ tách 3 bước:
+ * 1. /chat/classify — xác định có cần roll hay không (không tung xúc xắc).
+ * 2. /chat/roll — tung xúc xắc thật, tiêu hao tài nguyên (NHANH, không gọi
+ *    LLM) -> kết quả thành/bại hiện NGAY, không phải chờ AI kể chuyện.
+ * 3. /chat/narrate — gọi LLM kể chuyện dựa trên kết quả đã roll, chỉ chạy
+ *    SAU KHI người chơi đã thấy xong kết quả roll (bấm "Tiếp tục").
+ * needs_roll=false -> không có popup, vẫn roll (nhanh, không hiện gì) rồi
+ * narrate ngay. needs_roll=true -> mở popup, bấm "Tung xúc xắc" mới roll.
+ */
 async function handlePlayerAction(text) {
     if (!text || !text.trim()) return;
     setInputsEnabled(false);
@@ -262,35 +272,310 @@ async function handlePlayerAction(text) {
     const loadingEl = addLoading();
 
     try {
-        const res = await fetch('/chat', {
+        const res = await fetch('/chat/classify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ message: text }),
         });
-        const data = await res.json(); // {story, mechanics, choices}
-        loadingEl.remove();
+        const classifyData = await res.json();
 
-        // 1. Hiển thị nội dung truyện
-        const dmBubble = renderDmTurn(data);
-        lastTurnUserBubble = userBubble;
-        lastTurnDmBubble = dmBubble;
-
-        // 3. Hiển thị lựa chọn
-        renderChoices(data.choices);
-
-        if (data.mechanics && (data.mechanics.is_dead || data.mechanics.character_died)) {
-            showGameOver();
+        if (classifyData.error) {
+            loadingEl.remove();
+            addMessage('dm', `⚠️ ${classifyData.error}`);
+            setInputsEnabled(true);
+            return;
         }
 
-        // 4. Làm mới chỉ số nhân vật
-        loadCharacter();
+        if (!classifyData.needs_roll) {
+            const rollData = await fetchRoll();
+            if (rollData.error) {
+                loadingEl.remove();
+                addMessage('dm', `⚠️ ${rollData.error}`);
+                setInputsEnabled(true);
+                return;
+            }
+            const data = await fetchNarrate();
+            loadingEl.remove();
+            finishTurn(data, userBubble);
+        } else {
+            loadingEl.remove();
+            openDiceModal(classifyData, userBubble);
+        }
     } catch (e) {
         console.error('Lỗi:', e);
         loadingEl.remove();
         addMessage('dm', '⚠️ Hệ thống gặp lỗi xử lý.');
-    } finally {
         setInputsEnabled(true);
     }
+}
+
+/** /chat/roll — tung xúc xắc thật, trả kết quả NGAY (không có story, không
+ * gọi LLM): {success, roll_type, dice, dc, target_ac, attribute}. */
+async function fetchRoll(){
+    const res = await fetch('/chat/roll', { method: 'POST' });
+    return await res.json();
+}
+
+/** /chat/narrate — gọi LLM kể chuyện dựa trên kết quả /chat/roll đã lưu,
+ * trả kết quả đầy đủ {story, mechanics, choices}, y hệt format /chat cũ. */
+async function fetchNarrate(){
+    const res = await fetch('/chat/narrate', { method: 'POST' });
+    return await res.json();
+}
+
+/** Hoàn tất 1 lượt: render story/choices vào khung chat, cập nhật chỉ số,
+ * mở lại input. Dùng chung cho nhánh có popup lẫn không popup. */
+function finishTurn(data, userBubble){
+    if (data.error) {
+        addMessage('dm', `⚠️ ${data.error}`);
+        setInputsEnabled(true);
+        return;
+    }
+
+    const dmBubble = renderDmTurn(data);
+    lastTurnUserBubble = userBubble;
+    lastTurnDmBubble = dmBubble;
+
+    renderChoices(data.choices);
+
+    if (data.mechanics && (data.mechanics.is_dead || data.mechanics.character_died)) {
+        showGameOver();
+    }
+
+    loadCharacter();
+    fetchAndRenderContext();
+    setInputsEnabled(true);
+}
+
+/* ---------------------------- Context panel (ảnh scene) ---------------------------- */
+
+let contextPollTimer = null;
+
+/** Cập nhật panel context (ảnh + tên + mô tả location/quái/NPC hiện tại).
+ * ctx: {kind, name, description, image_path} — mọi field có thể null nếu
+ * chưa có gì được ghi nhận. */
+function renderContext(ctx){
+    const img = byId('context-image');
+    const placeholder = byId('context-placeholder');
+    const empty = byId('context-empty');
+    const nameEl = byId('context-name');
+    const descEl = byId('context-desc');
+
+    if (!ctx || !ctx.name) {
+        img.classList.add('hidden');
+        placeholder.classList.add('hidden');
+        nameEl.classList.add('hidden');
+        descEl.classList.add('hidden');
+        empty.classList.remove('hidden');
+        return;
+    }
+
+    empty.classList.add('hidden');
+    nameEl.textContent = ctx.name;
+    nameEl.classList.remove('hidden');
+    descEl.textContent = ctx.description || '';
+    descEl.classList.toggle('hidden', !ctx.description);
+
+    if (ctx.image_path) {
+        img.src = ctx.image_path;
+        img.classList.remove('hidden');
+        placeholder.classList.add('hidden');
+    } else {
+        // Ảnh đang generate bất đồng bộ ở backend — hiện placeholder, việc
+        // poll tiếp có/không do fetchAndRenderContext() quyết định.
+        img.classList.add('hidden');
+        placeholder.classList.remove('hidden');
+    }
+}
+
+/** Lấy context hiện tại từ backend, render ngay (tên/mô tả luôn có sẵn đồng
+ * bộ), rồi nếu ảnh chưa xong thì tự poll thêm vài lần tới khi có ảnh hoặc
+ * context đã bị lượt mới ghi đè (name đổi) thì dừng — ảnh generate bất đồng
+ * bộ ở backend, không chặn lượt chơi nào cả. */
+async function fetchAndRenderContext(){
+    if (contextPollTimer) {
+        clearTimeout(contextPollTimer);
+        contextPollTimer = null;
+    }
+    let ctx;
+    try {
+        const res = await fetch('/scene_context');
+        ctx = await res.json();
+    } catch (e) {
+        console.error('Lỗi khi tải context:', e);
+        return;
+    }
+    renderContext(ctx);
+
+    if (ctx && ctx.name && !ctx.image_path) {
+        pollContextImage(ctx.name, 0);
+    }
+}
+
+function pollContextImage(expectedName, attempt){
+    // ~90s tối đa — ảnh SD thường xong trong 1-2s (model đã load sẵn trong bộ
+    // nhớ), nhưng LẦN GENERATE ĐẦU TIÊN sau khi backend khởi động phải lazy-
+    // load model trước (torch/diffusers import + tải checkpoint vào VRAM),
+    // có thể mất 15-40s — cần đủ thời gian chờ cho riêng lần đầu đó.
+    if (attempt >= 45) return;
+    contextPollTimer = setTimeout(async () => {
+        let ctx;
+        try {
+            const res = await fetch('/scene_context');
+            ctx = await res.json();
+        } catch (e) {
+            return;
+        }
+        if (!ctx || ctx.name !== expectedName) return; // context đã đổi, dừng poll cũ
+        renderContext(ctx);
+        if (!ctx.image_path) pollContextImage(expectedName, attempt + 1);
+    }, 2000);
+}
+
+/* ---------------------------- Popup tung xúc xắc ---------------------------- */
+
+const ROLL_TYPE_LABEL = { advantage: 'LỢI THẾ', disadvantage: 'BẤT LỢI', normal: 'THƯỜNG' };
+const ROLL_TYPE_CLASS = { advantage: 'choice-adv', disadvantage: 'choice-dis', normal: '' };
+
+function openDiceModal(classifyData, userBubble){
+    const rollType = classifyData.roll_type || 'normal';
+    const rollClass = ROLL_TYPE_CLASS[rollType] || '';
+
+    const badge = byId('dice-roll-badge');
+    badge.className = 'choice-roll' + (rollClass ? ' ' + rollClass : '');
+    badge.textContent = ROLL_TYPE_LABEL[rollType] || 'THƯỜNG';
+
+    const dcLabel = byId('dice-dc-label');
+    if (classifyData.contest_type === 'attack') {
+        dcLabel.textContent = '🎯 Cần đánh trúng mục tiêu';
+    } else if (classifyData.dc != null) {
+        dcLabel.textContent = `DC ${classifyData.dc}`;
+    } else {
+        dcLabel.textContent = '';
+    }
+
+    const die1 = byId('die-1');
+    const die2 = byId('die-2');
+    die1.className = 'die';
+    die1.textContent = '?';
+    die2.className = rollType === 'normal' ? 'die hidden' : 'die';
+    die2.textContent = '?';
+
+    byId('dice-result').classList.add('hidden');
+    const rollBtn = byId('dice-roll-btn');
+    rollBtn.classList.remove('hidden');
+    rollBtn.disabled = false;
+    rollBtn.textContent = '🎲 Tung xúc xắc';
+    byId('dice-continue-btn').classList.add('hidden');
+
+    byId('dice-modal-overlay').classList.remove('hidden');
+
+    rollBtn.onclick = () => performRoll(userBubble);
+}
+
+/** Bấm "Tung xúc xắc" -> chỉ gọi /chat/roll (nhanh, không có LLM) -> hiện
+ * thành/bại NGAY trong popup. LLM kể chuyện (/chat/narrate) chỉ chạy SAU khi
+ * người chơi đã xem xong kết quả và bấm "Tiếp tục". */
+async function performRoll(userBubble){
+    const rollBtn = byId('dice-roll-btn');
+    const die1 = byId('die-1');
+    const die2 = byId('die-2');
+
+    rollBtn.disabled = true;
+    rollBtn.textContent = 'Đang tung…';
+    die1.classList.add('spinning');
+    if (!die2.classList.contains('hidden')) die2.classList.add('spinning');
+
+    // Chờ tối thiểu 700ms trước khi hiện kết quả, dù backend trả về nhanh hơn
+    // (nếu không, animation xoay sẽ bị "chớp" mất, mất cảm giác đang tung).
+    const minSpin = new Promise(resolve => setTimeout(resolve, 700));
+    let rollData;
+    try {
+        [rollData] = await Promise.all([fetchRoll(), minSpin]);
+    } catch (e) {
+        console.error('Lỗi khi tung xúc xắc:', e);
+        closeDiceModal();
+        addMessage('dm', '⚠️ Hệ thống gặp lỗi xử lý.');
+        setInputsEnabled(true);
+        return;
+    }
+
+    die1.classList.remove('spinning');
+    die2.classList.remove('spinning');
+
+    if (rollData.error) {
+        closeDiceModal();
+        addMessage('dm', `⚠️ ${rollData.error}`);
+        setInputsEnabled(true);
+        return;
+    }
+
+    revealDiceResult(rollData);
+    byId('dice-continue-btn').onclick = () => continueAfterRoll(userBubble);
+}
+
+/** Người chơi đã xem xong kết quả roll, bấm "Tiếp tục" -> đóng popup, gọi
+ * /chat/narrate (LLM kể chuyện) rồi render lượt DM như cũ. */
+async function continueAfterRoll(userBubble){
+    closeDiceModal();
+    const loadingEl = addLoading();
+    try {
+        const data = await fetchNarrate();
+        loadingEl.remove();
+        finishTurn(data, userBubble);
+    } catch (e) {
+        console.error('Lỗi khi kể chuyện:', e);
+        loadingEl.remove();
+        addMessage('dm', '⚠️ Hệ thống gặp lỗi xử lý.');
+        setInputsEnabled(true);
+    }
+}
+
+function revealDiceResult(mechanics){
+    const dice = mechanics.dice;
+    const die1 = byId('die-1');
+    const die2 = byId('die-2');
+    const detail = byId('dice-result-detail');
+
+    if (dice) {
+        const rolls = dice.rolls || [];
+        die1.classList.remove('hidden');
+        die1.textContent = rolls[0] ?? '?';
+
+        if (rolls.length > 1) {
+            const firstTaken = rolls[0] === dice.taken;
+            die2.classList.remove('hidden');
+            die2.textContent = rolls[1];
+            die1.classList.toggle('taken', firstTaken);
+            die1.classList.toggle('discarded', !firstTaken);
+            die2.classList.toggle('taken', !firstTaken);
+            die2.classList.toggle('discarded', firstTaken);
+        } else {
+            die2.classList.add('hidden');
+        }
+
+        const target = mechanics.target_ac != null
+            ? `AC ${mechanics.target_ac}`
+            : (mechanics.dc != null ? `DC ${mechanics.dc}` : '');
+        detail.textContent = `Xúc xắc: ${dice.taken} + ${dice.modifier} = ${dice.total}` + (target ? ` (Cần: ${target})` : '');
+    } else {
+        // forced_fail (hết item/cooldown/mana...) -> không có xúc xắc thật để hiện.
+        die1.classList.add('hidden');
+        die2.classList.add('hidden');
+        detail.textContent = '';
+    }
+
+    const banner = byId('dice-result-banner');
+    banner.textContent = mechanics.success ? '✅ Thành công' : '❌ Thất bại';
+    banner.className = 'dice-result-banner ' + (mechanics.success ? 'success' : 'fail');
+
+    byId('dice-result').classList.remove('hidden');
+    byId('dice-roll-btn').classList.add('hidden');
+    byId('dice-continue-btn').classList.remove('hidden');
+}
+
+function closeDiceModal(){
+    byId('dice-modal-overlay').classList.add('hidden');
 }
 
 /**
@@ -340,6 +625,7 @@ async function retryLastTurn(){
         }
 
         loadCharacter();
+        fetchAndRenderContext();
     } catch (e) {
         console.error('Lỗi khi thử lại:', e);
         addMessage('dm', '⚠️ Không thể thử lại lượt này.');
@@ -563,6 +849,7 @@ async function init(){
 
   if (char){
     startStory();
+    fetchAndRenderContext();
   } else {
     addMessage('dm', 'Chưa có nhân vật nào. Hãy quay lại màn hình tạo nhân vật trước.');
   }

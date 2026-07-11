@@ -233,7 +233,28 @@ async def game_state():
         "history": history,
         "last_result": last_result,
         "character": db.character_row_to_dict(char),
+        "scene_context": _scene_context_dict(char),
     }
+
+
+def _scene_context_dict(char) -> dict:
+    """Context panel hiện tại (location/quái/NPC mới nhất) — dùng chung giữa
+    /game_state (resume sau reload) và /scene_context (poll ảnh sau khi
+    imagegen.ensure_context_image chạy xong bất đồng bộ)."""
+    return {
+        "kind": char["context_kind"] if "context_kind" in char.keys() else None,
+        "name": char["context_name"] if "context_name" in char.keys() else None,
+        "description": char["context_desc"] if "context_desc" in char.keys() else None,
+        "image_path": char["context_image_path"] if "context_image_path" in char.keys() else None,
+    }
+
+
+@app.get("/scene_context")
+async def scene_context():
+    char = db.get_latest_character()
+    if not char:
+        return {"kind": None, "name": None, "description": None, "image_path": None}
+    return _scene_context_dict(char)
 
 
 # ---------------------------------------------------------------------------
@@ -245,9 +266,19 @@ async def assistant_ask(data: dict):
     return await assistant.handle_ask(data)
 
 
-@app.post("/chat")
-async def chat(data: dict):
-    return await dm.handle_chat(data)
+@app.post("/chat/classify")
+async def chat_classify(data: dict):
+    return await dm.handle_chat_classify(data)
+
+
+@app.post("/chat/roll")
+async def chat_roll():
+    return await dm.handle_chat_roll()
+
+
+@app.post("/chat/narrate")
+async def chat_narrate():
+    return await dm.handle_chat_narrate()
 
 
 @app.post("/chat/retry")

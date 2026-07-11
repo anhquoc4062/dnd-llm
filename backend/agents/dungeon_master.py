@@ -4,13 +4,14 @@ dungeon_master.py — Dungeon Master: system prompt + pipeline xử lý 1 lượ
 agents/assistant.py (ngoài truyện).
 """
 
+import asyncio
 import json
 
 import ollama
 
 import db
 from config import MODEL, OPTIONS
-from . import classification, entities, social, summarizer, campaign, lore, translation, world_state
+from . import classification, entities, imagegen, social, summarizer, campaign, lore, translation, world_state
 
 ATTR_LABELS = {
     "str": "STR/Sức mạnh", "dex": "DEX/Nhanh nhẹn", "con": "CON/Thể chất",
@@ -107,6 +108,11 @@ def _snapshot_pre_turn(conn, char_id: int, user_input: str):
         return
     char_dict = dict(char_row)
     char_dict.pop("pre_turn_snapshot", None)  # đừng lồng snapshot vào chính nó
+    # last_turn_resolution PHẢI sống sót qua restore — đây chính là kết quả
+    # xúc xắc THẬT mà người chơi đã bấm roll cho lượt sắp xử lý; nếu snapshot
+    # nó ở đây rồi restore đè lại, "Thử lại" sẽ mất kết quả roll gốc và không
+    # còn gì để tái dùng (phải roll lại — đúng thứ cần tránh).
+    char_dict.pop("last_turn_resolution", None)
 
     entity_rows = [dict(r) for r in c.execute(
         "SELECT * FROM entity WHERE character_id = ?", (char_id,)
@@ -144,7 +150,7 @@ def _restore_pre_turn(conn, char_id: int) -> str | None:
         return None
 
     char_fields = snap.get("character") or {}
-    cols = [k for k in char_fields.keys() if k not in ("id", "pre_turn_snapshot")]
+    cols = [k for k in char_fields.keys() if k not in ("id", "pre_turn_snapshot", "last_turn_resolution")]
     if cols:
         set_clause = ", ".join(f"{col} = ?" for col in cols)
         values = [char_fields[col] for col in cols]
@@ -365,6 +371,9 @@ EXISTING (key already in ACTIVE ENTITIES): send ONLY key + hp_change (negative=d
 positive=heal) + "status":"dead"/"fled" if applicable — never resend max_hp/type/name, never
 switch its species mid-scene, never invent stats for it.
 Monster names must be English, never Vietnamese.
+NEW entity only: "description" (Vietnamese, one sentence, shown to player) + "visual_prompt"
+(English, comma-separated visual traits — species/build/clothing/features — for image gen, not
+shown to player). Omit both when only updating an EXISTING entity.
 
 ## LOOT — PERSISTENCE RULES
 loot_dropped: only when the story this turn explicitly shows an item becoming available (kill
@@ -372,6 +381,13 @@ drop, chest opened, found item) — name (English), source_key (entity key or nu
 items_added must only reference items dropped THIS turn via loot_dropped, already in LOOT
 AVAILABLE, or a direct narrative reward clearly justified by the story — never invent combat
 loot without declaring it via loot_dropped first.
+
+## LOCATION
+mechanics.location: null on most turns; set ONLY the turn the character arrives at a NEW
+distinct place (never repeat while staying put, never trigger from a passing mention). name
+(English, short), description (Vietnamese, one sentence, shown to player), visual_prompt
+(English, comma-separated visual traits — architecture/terrain/mood/lighting — for image gen,
+not shown to player).
 
 ## LANGUAGE
 100% Vietnamese output, no exceptions, even in unclear/conflicting cases — just decide silently
@@ -392,9 +408,11 @@ Do NOT output "success"/"roll_type" — backend already decided those; writing t
     "entities": [
       {{"key": "<unique_entity_key>", "name": "<entity_name>", "type": "monster|npc|companion|object",
         "gender": "male|female (omit/null if not a person)", "max_hp": 0, "hp": 0, "ac": 12,
-        "hostile": false, "status": "alive|dead"}}
+        "hostile": false, "status": "alive|dead",
+        "description": "<Vietnamese, only for NEW entity>", "visual_prompt": "<English, only for NEW entity>"}}
     ],
-    "loot_dropped": [{{"name": "<item_name>", "source_key": "<entity_key>"}}]
+    "loot_dropped": [{{"name": "<item_name>", "source_key": "<entity_key>"}}],
+    "location": null
   }},
   "choices": [
     {{"text": "...", "needs_roll": true, "roll": "advantage", "dc": 12, "reason": {{"type": "attribute", "name": "WIS"}}}}
@@ -451,7 +469,45 @@ def _parse_dm_json(reply: str) -> dict:
         return {"story": reply, "mechanics": {"roll_type": "normal", "reasoning": ""}, "choices": []}
 
 
-async def handle_chat(data: dict) -> dict:
+def _localize_reason_name(reason_type, name, char_dict):
+    """Model chỉ biết tên EN của item/skill/trait — map ngược lại tên tiếng Việt
+    để hiển thị cho người chơi."""
+    name_lower = (name or "").strip().lower()
+    if reason_type == "strength":
+        for t in char_dict.get("strengths", []):
+            if (t.get("en") or t.get("name") or "").strip().lower() == name_lower:
+                return t.get("name") or name
+    elif reason_type == "weakness":
+        for t in char_dict.get("weaknesses", []):
+            if (t.get("en") or t.get("name") or "").strip().lower() == name_lower:
+                return t.get("name") or name
+    elif reason_type == "skill":
+        for s in char_dict.get("skills", []):
+            if (s.get("en") or "").strip().lower() == name_lower:
+                return s.get("vi") or name
+    elif reason_type == "item":
+        for i in char_dict.get("items", []):
+            if (i.get("en") or "").strip().lower() == name_lower:
+                return i.get("vi") or name
+    return name  # attribute (STR/DEX...) giữ nguyên, hoặc không tìm thấy match
+
+
+def _localize_choices(choices, char_dict):
+    for ch in choices or []:
+        if not isinstance(ch, dict):
+            continue  # phòng model trả sai schema (vd list string thay vì object)
+        reason = ch.get("reason")
+        if reason and reason.get("name"):
+            reason["name"] = _localize_reason_name(reason.get("type"), reason.get("name"), char_dict)
+    return choices
+
+
+async def handle_chat_classify(data: dict) -> dict:
+    """Phase 1/3 của 1 lượt /chat: phân loại hành động (LLM call #1), KHÔNG
+    tung xúc xắc, KHÔNG gọi LLM kể chuyện. Lưu mọi state cần cho các phase sau
+    vào cột character.pending_action, trả về bản rút gọn để frontend quyết
+    định có cần hiện popup dice-roll hay không (needs_roll=false -> FE gọi
+    thẳng handle_chat_roll rồi handle_chat_narrate, không có popup)."""
     user_input = data.get("message", "")
     char = db.get_latest_character()
     if not char:
@@ -625,39 +681,155 @@ async def handle_chat(data: dict) -> dict:
         active_entities=active_entities,
     )
 
-    def _localize_reason_name(reason_type, name, char_dict):
-        """Model chỉ biết tên EN của item/skill/trait — map ngược lại tên tiếng Việt
-        để hiển thị cho người chơi."""
-        name_lower = (name or "").strip().lower()
-        if reason_type == "strength":
-            for t in char_dict.get("strengths", []):
-                if (t.get("en") or t.get("name") or "").strip().lower() == name_lower:
-                    return t.get("name") or name
-        elif reason_type == "weakness":
-            for t in char_dict.get("weaknesses", []):
-                if (t.get("en") or t.get("name") or "").strip().lower() == name_lower:
-                    return t.get("name") or name
-        elif reason_type == "skill":
-            for s in char_dict.get("skills", []):
-                if (s.get("en") or "").strip().lower() == name_lower:
-                    return s.get("vi") or name
-        elif reason_type == "item":
-            for i in char_dict.get("items", []):
-                if (i.get("en") or "").strip().lower() == name_lower:
-                    return i.get("vi") or name
-        return name  # attribute (STR/DEX...) giữ nguyên, hoặc không tìm thấy match
+    # --- Lưu toàn bộ state cần cho các phase sau (handle_chat_roll rồi
+    # handle_chat_narrate) — người chơi
+    # có thể bấm popup dice-roll vài giây sau, không gọi lại classify nữa. Đè
+    # lên pending cũ nếu có (người chơi đổi ý gõ hành động khác trước khi bấm
+    # roll của hành động trước -> hành động cũ bị huỷ, không có gì phải dọn).
+    pending = {
+        "stage": "classified",
+        "user_input": user_input,
+        "char_id": char["id"],
+        "char_dict": char_dict,
+        "active_entities": active_entities,
+        "current_turn_before": current_turn_before,
+        "turn_note": turn_note,
+        "class_result": class_result,
+    }
+    conn_pending = db.get_conn()
+    conn_pending.execute(
+        "UPDATE character SET pending_action = ? WHERE id = ?",
+        (json.dumps(pending, ensure_ascii=False), char["id"]),
+    )
+    conn_pending.commit()
+    conn_pending.close()
 
-    def _localize_choices(choices, char_dict):
-        for ch in choices or []:
-            if not isinstance(ch, dict):
-                continue  # phòng model trả sai schema (vd list string thay vì object)
-            reason = ch.get("reason")
-            if reason and reason.get("name"):
-                reason["name"] = _localize_reason_name(reason.get("type"), reason.get("name"), char_dict)
-        return choices
+    adv_reason = class_result.get("advantage_reason")
+    display_reason = None
+    if adv_reason:
+        display_reason = {
+            "type": adv_reason.get("type"),
+            "name": _localize_reason_name(adv_reason.get("type"), adv_reason.get("name"), char_dict),
+        }
+
+    return {
+        "needs_roll": class_result.get("needs_roll", True),
+        "roll_type": class_result.get("advantage_state", "normal"),
+        "dc": class_result.get("dc"),
+        "contest_type": class_result.get("contest_type", "none"),
+        "attribute": class_result.get("attribute"),
+        "reason": display_reason,
+    }
+
+
+def _load_pending(expected_stage: str):
+    """Đọc pending_action của nhân vật gần nhất, trả (pending, error). error
+    khác None nếu không có pending hợp lệ đúng stage đang cần (frontend gọi
+    sai thứ tự, hoặc pending đã bị đè bởi 1 hành động mới hơn)."""
+    conn_p = db.get_conn()
+    row = conn_p.execute(
+        "SELECT pending_action FROM character ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn_p.close()
+    if not row or not row["pending_action"]:
+        return None, {"error": "Không có hành động nào đang chờ xử lý."}
+    try:
+        pending = json.loads(row["pending_action"])
+    except (TypeError, json.JSONDecodeError):
+        return None, {"error": "Không có hành động nào đang chờ xử lý."}
+    if pending.get("stage") != expected_stage:
+        return None, {"error": "Không có hành động nào đang chờ xử lý."}
+    return pending, None
+
+
+def _apply_consumption(char_id: int, resolution: dict):
+    """Tiêu hao tài nguyên (item/mana/cooldown) ứng với 1 resolution đã có sẵn
+    — dùng chung cho handle_chat_roll (lần roll đầu) và handle_chat_retry
+    (tái áp dụng đúng resolution CŨ sau khi pre-turn snapshot đã hoàn tác nó,
+    KHÔNG roll lại)."""
+    used_name = resolution["used_name"]
+    consumed_kind = resolution["consumed_kind"]
+    mana_cost = resolution["mana_cost"]
+
+    if consumed_kind == "item":
+        _consume_item(char_id, used_name)
+    elif consumed_kind == "skill":
+        _put_skill_on_cooldown(char_id, used_name)
+        _consume_mana(char_id, mana_cost)
+
+    # Hồi cooldown các skill khác đi 1 lượt
+    _tick_cooldowns(char_id, skip=used_name if consumed_kind == "skill" else None)
+
+
+async def handle_chat_roll() -> dict:
+    """Phase 2/3 — gọi ngay khi người chơi bấm "Tung xúc xắc" trên popup (hoặc
+    ngay lập tức từ frontend nếu classify trả needs_roll=false). CHỈ tung xúc
+    xắc thật + tiêu hao tài nguyên (nhanh, KHÔNG gọi LLM) rồi trả kết quả ngay
+    để popup hiện thành/bại tức thì — KHÔNG chờ LLM kể chuyện. Lưu lại kết quả
+    resolve vào pending_action (stage "resolved") cho handle_chat_narrate dùng
+    tiếp, VÀ vào cột last_turn_resolution (sống sót qua pre-turn snapshot) để
+    "Thử lại" sau này tái dùng đúng kết quả roll này, không roll lại."""
+    pending, err = _load_pending("classified")
+    if err:
+        return err
+
+    char_id = pending["char_id"]
+    char_dict = pending["char_dict"]
+    active_entities = pending["active_entities"]
+    class_result = pending["class_result"]
 
     # --- Kiểm tra tài nguyên + tung xúc xắc thật (module classification.py) ---
     resolution = classification.resolve_action(class_result, char_dict, active_entities=active_entities)
+
+    _apply_consumption(char_id, resolution)
+
+    pending["stage"] = "resolved"
+    pending["resolution"] = resolution
+    pending_json = json.dumps(pending, ensure_ascii=False)
+    conn_r = db.get_conn()
+    conn_r.execute(
+        "UPDATE character SET pending_action = ?, last_turn_resolution = ? WHERE id = ?",
+        (pending_json, pending_json, char_id),
+    )
+    conn_r.commit()
+    conn_r.close()
+
+    return {
+        "success": resolution["success"],
+        "roll_type": resolution["roll_type"],
+        "dice": resolution["dice"],
+        "dc": resolution["dc"],
+        "target_ac": resolution["target_ac"],
+        "attribute": resolution["attribute"],
+    }
+
+
+async def handle_chat_narrate() -> dict:
+    """Phase 3/3 — gọi ngay sau handle_chat_roll (người chơi đã thấy kết quả
+    dice thật trong popup). Đọc lại resolution đã lưu, gọi LLM kể chuyện, ghi
+    DB — y hệt phần sau của /chat trước khi tách."""
+    pending, err = _load_pending("resolved")
+    if err:
+        return err
+
+    conn_clear = db.get_conn()
+    conn_clear.execute(
+        "UPDATE character SET pending_action = NULL WHERE id = ?",
+        (pending["char_id"],),
+    )
+    conn_clear.commit()
+    conn_clear.close()
+
+    user_input = pending["user_input"]
+    char_dict = pending["char_dict"]
+    active_entities = pending["active_entities"]
+    current_turn_before = pending["current_turn_before"]
+    turn_note = pending["turn_note"]
+    resolution = pending["resolution"]
+
+    char = db.get_latest_character()
+    if not char:
+        return {"error": "Chưa có nhân vật."}
 
     success = resolution["success"]
     roll_type = resolution["roll_type"]
@@ -666,24 +838,13 @@ async def handle_chat(data: dict) -> dict:
     target_ac = resolution["target_ac"]
     attribute = resolution["attribute"]
     used_name = resolution["used_name"]
-    consumed_kind = resolution["consumed_kind"]
-    mana_cost = resolution["mana_cost"]
     resource_note = resolution["resource_note"]
     adv_reason = resolution["adv_reason"]
     contest_type = resolution["contest_type"]
     target_key = resolution["target_key"]
     damage = resolution["damage"]
     forced_fail = resolution["forced_fail"]
-
-    # --- Tiêu hao tài nguyên trong DB (bất kể thành công hay fail) ---
-    if consumed_kind == "item":
-        _consume_item(char["id"], used_name)
-    elif consumed_kind == "skill":
-        _put_skill_on_cooldown(char["id"], used_name)
-        _consume_mana(char["id"], mana_cost)
-
-    # Hồi cooldown các skill khác đi 1 lượt
-    _tick_cooldowns(char["id"], skip=used_name if consumed_kind == "skill" else None)
+    mana_cost = resolution["mana_cost"]
 
     reason_str = ""
     if adv_reason:
@@ -916,6 +1077,7 @@ async def handle_chat(data: dict) -> dict:
             # attack trượt, hoặc hazard né thành công -> không gây sát thương ở đâu cả
             result["mechanics"]["changes"]["hp"] = 0
 
+    new_entities = []
     if "changes" in result["mechanics"]:
         changes = result["mechanics"]["changes"]
         hp_delta = db.safe_int(changes.get("hp", 0))
@@ -939,7 +1101,7 @@ async def handle_chat(data: dict) -> dict:
         # ledger loot mới nhất để validate ---
         conn2 = db.get_conn()
         pre_turn_alive_keys = {(e.get("key") or "").strip().lower() for e in active_entities}
-        entities.apply_entity_changes(
+        new_entities = entities.apply_entity_changes(
             conn2, char["id"], result["mechanics"].get("entities"), turn_number
         )
         entities.register_loot_drops(
@@ -1038,6 +1200,47 @@ async def handle_chat(data: dict) -> dict:
     event_occurred = bool(result["mechanics"].get("event_occurred", False)) or milestone_advanced_this_turn
     new_turns_since_event = 0 if event_occurred else (char["turns_since_event"] or 0) + 1
 
+    # --- Context panel (ảnh location/quái/NPC mới xuất hiện) — pop "location"
+    # khỏi mechanics (chỉ tín hiệu nội bộ, giống milestone_complete, không phải
+    # thứ frontend cần trong response text). Ưu tiên entity mới (quái/NPC) hơn
+    # location vì "nóng" hơn về mặt kể chuyện nếu cả 2 cùng xảy ra 1 lượt.
+    location_context = result["mechanics"].pop("location", None)
+    if not isinstance(location_context, dict):
+        location_context = None
+
+    context_update = None
+    if new_entities:
+        e = new_entities[-1]
+        context_update = {
+            "kind": "monster" if e["entity_type"] == "monster" else "npc",
+            "name": e["name"],
+            "description": e.get("description") or "",
+            "visual_prompt": e.get("visual_prompt") or e["name"],
+        }
+    elif location_context and location_context.get("name"):
+        loc_name = str(location_context["name"]).strip()
+        context_update = {
+            "kind": "location",
+            "name": loc_name,
+            "description": str(location_context.get("description") or "").strip(),
+            "visual_prompt": str(location_context.get("visual_prompt") or loc_name).strip(),
+        }
+
+    if context_update:
+        conn_ctx = db.get_conn()
+        conn_ctx.execute(
+            "UPDATE character SET context_kind = ?, context_name = ?, context_desc = ?, "
+            "context_image_path = NULL WHERE id = ?",
+            (context_update["kind"], context_update["name"], context_update["description"], char["id"]),
+        )
+        conn_ctx.commit()
+        conn_ctx.close()
+        # Bất đồng bộ hoàn toàn — KHÔNG await, response trả về frontend ngay lập
+        # tức, ảnh xuất hiện sau (frontend tự poll /scene_context tới khi có).
+        asyncio.create_task(imagegen.ensure_context_image(
+            char["id"], context_update["kind"], context_update["name"], context_update["visual_prompt"]
+        ))
+
     conn = db.get_conn()
     c = conn.cursor()
     c.execute(
@@ -1060,12 +1263,29 @@ async def handle_chat(data: dict) -> dict:
 
 async def handle_chat_retry() -> dict:
     """Khôi phục state về NGAY TRƯỚC lượt /chat gần nhất (xem
-    _snapshot_pre_turn/_restore_pre_turn) rồi chạy lại y hệt hành động đó —
-    dùng khi model sinh lỗi (lộ tên NPC chưa giới thiệu, quái ngoài roster,
-    lẫn tiếng khác...). Chỉ thử lại được lượt GẦN NHẤT."""
+    _snapshot_pre_turn/_restore_pre_turn) rồi kể lại câu chuyện cho ĐÚNG kết
+    quả xúc xắc người chơi đã roll (last_turn_resolution) — dùng khi model
+    kể chuyện sinh lỗi (lộ tên NPC chưa giới thiệu, quái ngoài roster, lẫn
+    tiếng khác...). KHÔNG classify lại, KHÔNG roll lại — xúc xắc là quyết định
+    của người chơi, "Thử lại" chỉ redo phần kể chuyện của LLM. Chỉ thử lại
+    được lượt GẦN NHẤT."""
     char = db.get_latest_character()
     if not char:
         return {"error": "Chưa có nhân vật."}
+
+    last_turn_raw = char["last_turn_resolution"] if "last_turn_resolution" in char.keys() else None
+    last_turn = None
+    if last_turn_raw:
+        try:
+            last_turn = json.loads(last_turn_raw)
+        except (TypeError, json.JSONDecodeError):
+            last_turn = None
+
+    # Kiểm tra last_turn TRƯỚC khi phục hồi state — nếu không có gì để thử
+    # lại, đừng hoàn tác state rồi mới báo lỗi (sẽ để game kẹt ở trạng thái đã
+    # rollback nhưng chưa kể lại lượt nào cả).
+    if last_turn is None:
+        return {"error": "Không có lượt nào để thử lại."}
 
     conn = db.get_conn()
     replayed_input = _restore_pre_turn(conn, char["id"])
@@ -1074,7 +1294,21 @@ async def handle_chat_retry() -> dict:
     if replayed_input is None:
         return {"error": "Không có lượt nào để thử lại."}
 
-    result = await handle_chat({"message": replayed_input})
+    # pre-turn snapshot vừa hoàn tác tiêu hao item/mana/cooldown của lượt gốc
+    # -> áp lại ĐÚNG resolution cũ (không random lại) để state nhất quán với
+    # kết quả roll người chơi đã thấy, rồi để handle_chat_narrate kể lại.
+    _apply_consumption(last_turn["char_id"], last_turn["resolution"])
+
+    last_turn["stage"] = "resolved"
+    conn2 = db.get_conn()
+    conn2.execute(
+        "UPDATE character SET pending_action = ? WHERE id = ?",
+        (json.dumps(last_turn, ensure_ascii=False), last_turn["char_id"]),
+    )
+    conn2.commit()
+    conn2.close()
+
+    result = await handle_chat_narrate()
     if isinstance(result, dict):
         result["replayed_input"] = replayed_input
     return result
