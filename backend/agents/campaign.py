@@ -19,23 +19,23 @@ KIẾN TRÚC 2 TẦNG (Bible cố định + Milestone sinh dần — xem agents/
   ra (xem milestone._build_milestone_prompt) — vừa giữ campaign không lạc đề,
   vừa không cứng nhắc như kịch bản viết sẵn.
 
-Người chơi chỉ thấy đúng 1 câu "theme" (hook, hiển thị lúc tạo nhân vật) —
-toàn bộ phần còn lại bị giấu khỏi UI, chỉ được nhét vào system prompt cho DM
-đọc (xem format_campaign_context). Campaign Bible được lưu ra 1 FILE JSON
-riêng (backend/game-data/campaign_saves/current_campaign.json — xem save/load
-bên dưới) thay vì chỉ nằm trong 1 cột TEXT của SQLite, để dễ mở lên xem/theo
-dõi lúc dev/debug.
+Người chơi chỉ thấy đúng 1 câu "theme" (campaign seed, hiển thị lúc tạo nhân
+vật) — toàn bộ phần còn lại bị giấu khỏi UI, chỉ được nhét vào system prompt
+cho DM đọc (xem format_campaign_context). Campaign Bible được lưu ra 1 FILE
+JSON riêng (backend/game-data/campaign_saves/current_campaign.json — xem
+save/load bên dưới) thay vì chỉ nằm trong 1 cột TEXT của SQLite, để dễ mở lên
+xem/theo dõi lúc dev/debug.
 
 Có 3 điểm vào:
-- generate_campaign_hooks(): AI chỉ bịa 5 câu "theme" (hook) ngắn, mỗi câu một
-  "vị" khác nhau — KHÔNG sinh phần còn lại ở bước này, để trả kết quả nhanh
-  cho người chơi chọn trước khi tốn thời gian khai triển đầy đủ.
-- expand_campaign_hook(theme): sau khi người chơi chọn 1 trong 5 hook ở trên,
-  khai triển ĐÚNG hook đó (giữ nguyên câu theme) thành đầy đủ Campaign Bible.
+- generate_campaign_seeds(): AI chỉ bịa 5 câu "theme" (campaign seed) ngắn,
+  mỗi câu một "vị" khác nhau — KHÔNG sinh phần còn lại ở bước này, để trả kết
+  quả nhanh cho người chơi chọn trước khi tốn thời gian khai triển đầy đủ.
+- expand_campaign_seed(theme): sau khi người chơi chọn 1 trong 5 seed ở trên,
+  khai triển ĐÚNG seed đó (giữ nguyên câu theme) thành đầy đủ Campaign Bible.
 - expand_custom_seed(text): người chơi tự viết 1 ý tưởng/theme ngắn, AI khai
   triển ra Campaign Bible bám sát ý tưởng gốc thay vì bịa lạc đề.
 
-generate_campaign_hooks() tắt "think" để lấy tốc độ (chỉ sinh vài câu ngắn).
+generate_campaign_seeds() tắt "think" để lấy tốc độ (chỉ sinh vài câu ngắn).
 Cả 2 hàm expand đều bật "think" — model được yêu cầu tự SELF-CHECK (tính nhất
 quán timeline, động cơ NPC, pacing 3 act) trong lúc "suy nghĩ" rồi tự sửa
 TRƯỚC KHI xuất JSON cuối, thay vì chỉ viết 1 lần và hy vọng đúng — xem
@@ -58,8 +58,8 @@ CAMPAIGN_MODEL = "qwen3:14b"
 SEED_COUNT = 5
 
 # Chỉ sinh vài câu ngắn -> ngân sách token nhỏ hơn nhiều, và think=False vì
-# không cần suy luận sâu cho việc bịa 1 câu hook.
-HOOKS_OPTIONS = {"num_ctx": 4096, "num_predict": 1200, "temperature": 0.95}
+# không cần suy luận sâu cho việc bịa 1 câu seed.
+SEEDS_OPTIONS = {"num_ctx": 4096, "num_predict": 1200, "temperature": 0.95}
 
 # Campaign Bible giờ GỌN hơn bản cũ (bỏ story_milestones/secrets/revelation_
 # order — những thứ đó chuyển sang milestone.py sinh dần), nhưng vẫn đủ lớn
@@ -109,7 +109,7 @@ _DEFAULT_BIBLE = {
     },
     "characters": {
         "main_antagonist": {
-            "name": "The Awakened One", "desc": "The ancient evil at the heart of the plot.",
+            "name": "The Awakened One", "gender": "", "desc": "The ancient evil at the heart of the plot.",
             "appearance": "A towering, half-formed silhouette of shifting shadow and cracked bone.",
             "visual_prompt": "towering shadow entity, cracked bone fragments, shifting silhouette, ominous glow",
             "moveset": "Reality-warping strikes, summons minor shadow beasts, a devastating area pulse at low health.",
@@ -297,8 +297,11 @@ def _normalize_bible(obj: dict) -> dict:
                 })
         if not stages:
             stages = [dict(st) for st in _DEFAULT_BIBLE["characters"]["main_antagonist"]["plan_stages"]]
+        antag_gender = _s(antagonist_raw, "gender").lower()
         antagonist = {
-            "name": _s(antagonist_raw, "name"), "desc": _s(antagonist_raw, "desc"),
+            "name": _s(antagonist_raw, "name"),
+            "gender": antag_gender if antag_gender in ("male", "female") else "",
+            "desc": _s(antagonist_raw, "desc"),
             "appearance": _s(antagonist_raw, "appearance"), "visual_prompt": _s(antagonist_raw, "visual_prompt"),
             "moveset": _s(antagonist_raw, "moveset"), "behavior": _s(antagonist_raw, "behavior"),
             "ultimate_goal": _s(antagonist_raw, "ultimate_goal"), "plan_stages": stages,
@@ -402,120 +405,102 @@ def _normalize_bible(obj: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 5 hook (chỉ câu "theme") do AI tự bịa — nhanh, để người chơi chọn trước khi
-# tốn thời gian khai triển đầy đủ
+# 5 campaign seed (chỉ câu "theme") do AI tự bịa — nhanh, để người chơi chọn
+# trước khi tốn thời gian khai triển đầy đủ Bible. Gọi là "seed" (không còn
+# "hook") vì kiến trúc giờ là cả 1 Campaign Bible đầy đủ — seed chỉ là hạt
+# giống 1 câu để khai triển từ đó, không phải "hook" gợi ý gimmick/mở đầu.
 # ---------------------------------------------------------------------------
 
-def _build_hooks_prompt() -> str:
-    return f"""You are a D&D 5e campaign designer. Output ONLY a JSON object (no markdown,
-no thinking, be fast) with a single key "hooks": an array of EXACTLY {SEED_COUNT} short hook
-sentences for a solo dark-fantasy campaign.
+def _build_seeds_prompt() -> str:
+    return f"""You are a master D&D 5e dark-fantasy campaign designer with a gift for irresistible
+hooks. Output ONLY a JSON object (no markdown, no thinking) with a single key "seeds": an array of
+EXACTLY {SEED_COUNT} campaign seed sentences for solo dark-fantasy adventures.
 
-Each of the {SEED_COUNT} hooks MUST be a genuinely different FLAVOR/GENRE of story — not
-{SEED_COUNT} variations of the same "ancient evil awakens" plot. Spread across distinct vibes
-such as (pick {SEED_COUNT} different ones, your choice): political intrigue/betrayal,
-heist/theft, revenge/personal vendetta, cosmic horror/eldritch dread, survival/wilderness
-disaster, mystery/investigation, war/siege, cursed bloodline/tragedy, rescue/hostage, forbidden
-knowledge/cult. No two hooks may share the same core vibe, and each of the {SEED_COUNT} hooks
-MUST imply a DIFFERENT WORLD/PLACE from the others — do not reuse the same kingdom/city/region
-across hooks, even implicitly.
+A seed is the SINGLE gripping moment that opens an adventure — not a plot, backstory, or synopsis.
+Drop the player straight into a situation already gone wrong.
 
-SETTING: D&D 5e MEDIEVAL DARK-FANTASY (swords, bows, magic, curses, gods, undead, fey,
-aberrations). You are NOT limited to the Forgotten Realms specifically — feel free to invent
-an original world/region/culture for each hook (its own geography, faction, myth, or curse)
-rather than defaulting to generic "the kingdom"/"the realm" phrasing. NEVER introduce sci-fi/
-technological/modern elements: no robots, holograms, simulations, computers/code, lasers/
-plasma, drones, cyberpunk, or "reality is a simulation/matrix" framing. A hook about illusion/
-false reality/stolen identity must be framed through MAGIC (a trickster god's curse, a fey
-mirror-realm, a mad archmage's dream-prison, a doppelganger plot) — never through technology.
+## WHAT MAKES A SEED GRIP (this is the whole point — hit EVERY one)
+- ONE specific, concrete, physical WRONGNESS the reader can picture instantly — a precise unsettling
+  image, never an abstract idea. NOT "a curse haunts you" (vague) but "your reflection has started
+  aging faster than you" (concrete, visceral).
+- PERSONAL stakes: the strange thing is happening to YOU, right now, not to a distant kingdom.
+- A burning UNANSWERED QUESTION the reader cannot walk away from — who, why, what now.
+- SENSORY, concrete nouns over generic fantasy words. Avoid empty adjectives ("dark", "mysterious",
+  "ancient evil") — show the specific thing instead.
+- Dread or urgency in the very first clause. Lead with the wrong thing, not with setup.
 
-Each hook: ONE sentence in Vietnamese, SECOND PERSON ("Bạn là...", "Bạn bị...", "Bạn vừa...",
-etc.), max ~35 words. It must do BOTH of:
-(a) tell the player WHAT ROLE/SITUATION they are in, with one concrete, specific WRONGNESS or
-    UNANSWERED QUESTION that makes them want to know "why/how/who" — not just a mood or a job
-    description. A flat statement like "Bạn là một thợ săn tiền thưởng trong một thành phố đầy
-    tội phạm" is BAD (no mystery, just a job).
-(b) sketch a glimpse of the WORLD itself — name or hint at a specific place, faction, myth,
-    law, or phenomenon that makes this world feel strange/distinct (not just "a dangerous
-    land"). The mystery should feel bigger than just the player's personal situation.
-Stay intriguing and do NOT spoil any plot twist (there is no plot behind it yet — that gets
-written later only for the hook the player picks).
+## STYLE-BAR EXAMPLES (these show the QUALITY/VOICE to match — NEVER reuse their premises,
+## settings, or images; invent your own, just as vivid)
+- "Bạn tỉnh dậy trong nhà xác của tu viện, còn thở, còn cử động — nhưng trên phiến đá lạnh bên cạnh là chính thi thể của bạn, đã chết ba ngày và bắt đầu rữa."
+- "Nữ hoàng phong bạn làm đao phủ hoàng gia, nhưng kẻ tử tù đầu tiên bạn phải chém lại đeo đúng chiếc nhẫn mà mẹ bạn đã mang theo xuống mồ mười năm trước."
+- "Sáng nay cả làng lại quỳ rạp về phía cái giếng cạn khi chuông đổ, và bạn kinh hoàng nhận ra mình cũng vừa quỳ xuống — dù bạn thề chưa hề nghe thấy một tiếng chuông nào."
 
-VARY THE DEVICE across the {SEED_COUNT} hooks — do not lean on the same trick twice. In
-particular, DO NOT use "nhận được một lá thư/bức thư" (receiving a letter/note) more than
-ONCE across the set; prefer other devices such as:
-- an impossible/contradictory fact about the player ("...nhưng không ai nhớ bạn từng ở đó")
-- a physical mark/wound/object on the player they can't explain
-- a place, law, or ritual specific to this world that the player is entangled in
-- someone/something reacting to the player in a way that doesn't make sense yet
-- a countdown or consequence already in motion ("...trước khi [cụ thể] xảy ra lần nữa")
-- a betrayal or reveal already half-visible but not yet named
-- the player waking into/being thrust into an already-strange location or event
-Avoid generic fantasy flavor text with no hook (no plain "bạn là chiến binh/pháp sư trong một
-vùng đất nguy hiểm" with nothing unresolved attached).
+## HARD RULES
+- SETTING: D&D 5e medieval dark fantasy ONLY (swords, bows, magic, curses, gods, undead, fey,
+  aberrations). Original worlds encouraged. NEVER sci-fi/modern (robots, AI, lasers, simulations).
+  Any illusion or false reality must be magical in nature.
+- Each seed: exactly ONE Vietnamese sentence, SECOND PERSON ("Bạn..."), at most ~45 words, and it
+  must NOT reveal any future twist or its own answer.
+- All {SEED_COUNT} seeds must be radically different from each other — different flavor (intrigue,
+  revenge, survival, forbidden knowledge, cursed bloodline, heist, cosmic horror, war, haunting...),
+  different world/culture/faction, and a DIFFERENT kind of inciting incident. Do NOT reuse the same
+  device twice; in particular do NOT use "receiving a letter/summons" more than once total.
+- No generic openers like "Bạn là một chiến binh..." unless something impossible has ALREADY struck.
 
-Model the SPECIFICITY, world-glimpse, and dangling-question quality of these examples (do not
-reuse them verbatim, and do not copy their exact phrasing/structure either):
-"Bạn là người duy nhất nhận ra danh tính của mình đã bị đánh cắp trong thành phố Vaelthorn, nơi
-không ai còn nhớ bạn từng tồn tại.", "Bạn tỉnh dậy trong quan tài của chính mình giữa nghĩa
-địa của một dòng tu đã bị giải tán 200 năm trước, với ngày mất khắc sẵn trên bia — chỉ thiếu
-ngày, tháng.", "Ba người trước bạn từng đeo chiếc nhẫn của gia tộc Draumeir, và cả ba đều biến
-mất đúng đêm trăng tròn thứ bảy sau khi nhận nó.", "Bạn là sứ giả duy nhất sống sót trở về từ
-hội nghị hòa bình giữa ba vương triều, nơi mọi phái đoàn khác đều bị giết trong phòng khóa kín."
+Output EXACTLY:
 
-Output EXACTLY this shape:
-{{"hooks": ["...", "...", "...", "...", "..."]}}"""
+{{"seeds":["...", "...", "...", "...", "..."]}}"""
 
 
-def generate_campaign_hooks(model: str = None, options: dict = None) -> list:
+def generate_campaign_seeds(model: str = None, options: dict = None) -> list:
     """Gọi model 1 lần (think=False, ngân sách token nhỏ) để bịa nhanh
-    SEED_COUNT câu hook. Không sinh phần còn lại — phần đó chỉ khai triển sau
-    khi người chơi đã chọn (xem expand_campaign_hook). Lỗi/parse hỏng ->
-    fallback về theme mặc định lặp lại (vẫn đủ SEED_COUNT phần tử để UI không
-    vỡ)."""
+    SEED_COUNT câu campaign seed. Không sinh phần còn lại — phần đó chỉ khai
+    triển sau khi người chơi đã chọn (xem expand_campaign_seed). Lỗi/parse
+    hỏng -> fallback về theme mặc định lặp lại (vẫn đủ SEED_COUNT phần tử để
+    UI không vỡ)."""
     model = model or CAMPAIGN_MODEL
-    options = options or HOOKS_OPTIONS
+    options = options or SEEDS_OPTIONS
 
     try:
         response = ollama.chat(
             model=model,
-            messages=[{"role": "system", "content": _build_hooks_prompt()}],
+            messages=[{"role": "system", "content": _build_seeds_prompt()}],
             format="json",
             options=options,
             think=False,
         )
         content = response["message"]["content"]
         parsed = _parse_campaign_json(content)
-        hooks_raw = parsed.get("hooks") if isinstance(parsed, dict) else None
-        if not isinstance(hooks_raw, list):
+        seeds_raw = parsed.get("seeds") if isinstance(parsed, dict) else None
+        if not isinstance(seeds_raw, list):
             print(
-                f"[DEBUG] generate_campaign_hooks: content không parse được thành hooks "
+                f"[DEBUG] generate_campaign_seeds: content không parse được thành seeds "
                 f"hợp lệ (content={content[:200]!r}) -> fallback {SEED_COUNT} default"
             )
-            hooks_raw = []
+            seeds_raw = []
     except Exception as e:
-        print(f"[DEBUG] generate_campaign_hooks lỗi ({e}) -> fallback {SEED_COUNT} default")
-        hooks_raw = []
+        print(f"[DEBUG] generate_campaign_seeds lỗi ({e}) -> fallback {SEED_COUNT} default")
+        seeds_raw = []
 
-    hooks = [str(h).strip() for h in hooks_raw[:SEED_COUNT] if str(h).strip()]
-    while len(hooks) < SEED_COUNT:
-        hooks.append(_DEFAULT_BIBLE["campaign"]["theme"])
-    return hooks
+    seeds = [str(s).strip() for s in seeds_raw[:SEED_COUNT] if str(s).strip()]
+    while len(seeds) < SEED_COUNT:
+        seeds.append(_DEFAULT_BIBLE["campaign"]["theme"])
+    return seeds
 
 
 # ---------------------------------------------------------------------------
-# Campaign Bible — khai triển đầy đủ, dùng chung cho cả 2 nguồn (hook do AI
+# Campaign Bible — khai triển đầy đủ, dùng chung cho cả 2 nguồn (seed do AI
 # gợi ý / ý tưởng người chơi tự viết)
 # ---------------------------------------------------------------------------
 
 def _build_campaign_bible_prompt(theme: str = None, user_idea: str = None) -> str:
     if theme:
-        seed_instruction = f"""CHOSEN HOOK — the player already picked this exact sentence and has seen it; you MUST
+        seed_instruction = f"""CHOSEN SEED — the player already picked this exact sentence and has seen it; you MUST
 put it back VERBATIM as "theme" in your output, do not reword it even slightly:
 \"\"\"{theme}\"\"\""""
     else:
         seed_instruction = f"""PLAYER'S OWN IDEA — the player wrote this themselves (may be short/rough, may be in
-Vietnamese). Distill it into ONE polished Vietnamese hook sentence for "theme" (SECOND PERSON,
+Vietnamese). Distill it into ONE polished Vietnamese seed sentence for "theme" (SECOND PERSON,
 "Bạn là...”/"Bạn bị...”, max ~35 words) that stays faithful to their core premise — do not
 replace it with something unrelated, but you may tidy the wording:
 \"\"\"{user_idea}\"\"\""""
@@ -540,8 +525,8 @@ anything you leave vague:
 ## SETTING
 D&D 5e MEDIEVAL DARK-FANTASY (swords, bows, magic, curses, gods, undead, fey, aberrations). You
 are NOT limited to the Forgotten Realms — invent an original world/region/culture/myth that fits
-the hook. NEVER introduce sci-fi/modern elements (no robots, holograms, simulations, computers,
-lasers, drones, cyberpunk, "it's all a simulation"). If the hook implies illusion/false reality,
+the seed. NEVER introduce sci-fi/modern elements (no robots, holograms, simulations, computers,
+lasers, drones, cyberpunk, "it's all a simulation"). If the seed implies illusion/false reality,
 reframe it through MAGIC (a god's curse, a fey mirror-realm, a mad archmage's dream-prison, a
 doppelganger plot) — never through technology.
 
@@ -575,21 +560,23 @@ need for full sentences).
 
 3. STORY — main_goal (what the character is ultimately trying to achieve), main_conflict (the
    central tension driving the whole campaign, one sentence), hidden_truths (2-4 SECRET facts
-   behind the hook — the twist, a hidden identity, the villain's true plan — each with a short
+   behind the seed — the twist, a hidden identity, the villain's true plan — each with a short
    id and description; these are NEVER shown to the DM directly turn-to-turn, only surfaced
    later through milestones, so don't worry about revelation order here), main_plot (2-3
    sentences: the throughline connecting opening to finale), narrative_constraints (2-4 hard
    rules the DM must never violate, e.g. "X's identity must never be confirmed before Act 3",
    "the character cannot permanently leave [place] before Y").
 
-4. CHARACTERS — main_antagonist: name/desc/appearance/visual_prompt/moveset/behavior PLUS
-   ultimate_goal (one sentence) and plan_stages (3-5 ORDERED concrete steps they're executing
-   toward that goal RIGHT NOW, independent of the player — this is what stops the threat from
-   being a static fact that never moves). key_npcs: 2-4 named NPCs who matter to the MAIN plot
-   across the whole campaign (not a single milestone) — for each: gender (fixed ground truth
-   for pronouns), role (ally/rival/neutral/antagonist-adjacent), motivation, personality,
-   relationships (who they trust/distrust and why), secrets (what they're hiding), appearance,
-   visual_prompt.
+4. CHARACTERS — main_antagonist: name, gender ("male"/"female" if a person — the DM narrates
+   them with these pronouns; use "" ONLY for a genuinely non-human/genderless entity), desc,
+   appearance/visual_prompt/moveset/behavior PLUS ultimate_goal (one sentence) and plan_stages
+   (3-5 ORDERED concrete steps they're executing toward that goal RIGHT NOW, independent of the
+   player — this is what stops the threat from being a static fact that never moves). key_npcs:
+   2-4 named NPCs who matter to the MAIN plot across the whole campaign (not a single milestone)
+   — for each: gender ("male"/"female", REQUIRED — this is the fixed ground truth the DM uses
+   for every pronoun; never leave it blank for a person), role (ally/rival/neutral/antagonist-
+   adjacent), motivation, personality, relationships (who they trust/distrust and why), secrets
+   (what they're hiding), appearance, visual_prompt.
 
 5. CONTENT — major_monsters: 1-3 LEGENDARY/recurring-threat creatures tied to the main plot
    (not generic fodder — those get invented per-milestone later) — name/species/appearance/
@@ -630,7 +617,7 @@ never narrate the check itself or mention having done it.
   campaign? If something feels like it only matters for one scene/moment, CUT it — it belongs
   in a later milestone, not here.
 - COHERENCE: do world, characters, content, and acts all connect to ONE coherent plot? Does
-  main_conflict actually follow from the hook?
+  main_conflict actually follow from the seed?
 - ACT PROGRESSION: does each act's exit_condition logically lead into the next act's purpose?
   Is Act 3's exit_condition an actual satisfying resolution, not a vague non-ending?
 - ENDING DISTINCTNESS: are the possible_endings' trigger_conditions genuinely different axes
@@ -665,7 +652,8 @@ Vietnamese. LITERALLY EVERY OTHER STRING in the JSON below = ENGLISH ONLY, no ex
   }},
   "characters": {{
     "main_antagonist": {{
-      "name": "...", "desc": "...", "appearance": "...", "visual_prompt": "...",
+      "name": "...", "gender": "male|female (or \"\" if a non-human/genderless entity)",
+      "desc": "...", "appearance": "...", "visual_prompt": "...",
       "moveset": "...", "behavior": "...", "ultimate_goal": "...",
       "plan_stages": [{{"stage": 1, "title": "...", "description": "..."}}]
     }},
@@ -727,10 +715,10 @@ def _generate_campaign_bible(theme: str = None, user_idea: str = None, model: st
     return bible
 
 
-def expand_campaign_hook(theme: str, model: str = None, options: dict = None) -> dict:
-    """Khai triển 1 hook (đã chọn từ generate_campaign_hooks) thành đầy đủ
-    Campaign Bible. Giữ nguyên theme gốc bất kể model trả về gì (không để
-    model viết lại câu hook người chơi đã thấy và chọn)."""
+def expand_campaign_seed(theme: str, model: str = None, options: dict = None) -> dict:
+    """Khai triển 1 campaign seed (đã chọn từ generate_campaign_seeds) thành
+    đầy đủ Campaign Bible. Giữ nguyên theme gốc bất kể model trả về gì (không
+    để model viết lại câu seed người chơi đã thấy và chọn)."""
     return _generate_campaign_bible(theme=(theme or "").strip(), model=model, options=options)
 
 
@@ -764,6 +752,13 @@ def load_campaign_bible() -> dict:
         return None
 
 
+def delete_campaign_bible():
+    """Xoá hẳn campaign bible — dùng khi người chơi bấm "Xoá campaign" (khác
+    "Chơi lại", vốn CỐ Ý giữ lại bible để tái sử dụng)."""
+    if os.path.exists(CAMPAIGN_SAVE_PATH):
+        os.remove(CAMPAIGN_SAVE_PATH)
+
+
 # ---------------------------------------------------------------------------
 # Context cho DM (system prompt) — bị giấu khỏi UI, chỉ DM đọc
 # ---------------------------------------------------------------------------
@@ -782,6 +777,23 @@ def monster_roster_names(bible: dict, current_milestone: dict = None) -> list:
         for e in (current_milestone.get("possible_encounters") or []):
             if isinstance(e, dict) and e.get("name"):
                 names.append(e["name"])
+    return names
+
+
+def npc_roster_names(bible: dict, current_milestone: dict = None) -> list:
+    """Song song với monster_roster_names() nhưng cho NPC — gộp key_npcs
+    (Bible, cố định) với npcs (milestone hiện tại, disposable). Dùng để nhắc
+    turn_note luân phiên NPC/quái thay vì chỉ luôn nhắc quái (trước đây guard
+    chống spam entity chỉ có danh sách quái, khiến model thiên vị luôn bịa
+    quái thay vì NPC khi cần 1 entity mới)."""
+    names = []
+    if bible:
+        bible = _normalize_bible(bible)
+        names.extend(n["name"] for n in bible["characters"]["key_npcs"] if n.get("name"))
+    if current_milestone:
+        for n in (current_milestone.get("npcs") or []):
+            if isinstance(n, dict) and n.get("name"):
+                names.append(n["name"])
     return names
 
 
@@ -825,7 +837,10 @@ def format_campaign_context(bible: dict, current_milestone: dict = None, act_ind
     ) or "None"
 
     antagonist = ch["main_antagonist"]
-    antagonist_line = f"{antagonist['name']} — {antagonist['desc']}"
+    antagonist_line = f"{antagonist['name']}"
+    if antagonist.get("gender"):
+        antagonist_line += f" ({antagonist['gender']})"
+    antagonist_line += f" — {antagonist['desc']}"
     if antagonist.get("appearance"):
         antagonist_line += f" | appearance: {antagonist['appearance']}"
     if antagonist.get("moveset"):
@@ -863,12 +878,20 @@ def format_campaign_context(bible: dict, current_milestone: dict = None, act_ind
     if current_milestone:
         m = current_milestone
         ms_npcs = "; ".join(
-            f"{n.get('name')} ({n.get('role', 'npc')})" for n in (m.get("npcs") or []) if isinstance(n, dict) and n.get("name")
+            f"{n.get('name')} ({n.get('role', 'npc')}{', ' + n.get('gender') if n.get('gender') else ''})"
+            for n in (m.get("npcs") or []) if isinstance(n, dict) and n.get("name")
         ) or "None"
         ms_loc = m.get("location") or {}
         ms_loc_line = f"{ms_loc.get('name', '')} — {ms_loc.get('description', '')}" if ms_loc.get("name") else "Same as current scene"
+        ms_sublocs = "; ".join(
+            f"{l.get('name')}" for l in (m.get("sub_locations") or []) if isinstance(l, dict) and l.get("name")
+        ) or "None"
         ms_encounters = "; ".join(
             f"{e.get('name')}" for e in (m.get("possible_encounters") or []) if isinstance(e, dict) and e.get("name")
+        ) or "None"
+        ms_objects = "; ".join(
+            f"{o.get('name')}" + (f" [{o.get('interaction')}]" if o.get("interaction") else "")
+            for o in (m.get("interactive_objects") or []) if isinstance(o, dict) and o.get("name")
         ) or "None"
         milestone_block = f"""
 CURRENT MILESTONE (this is your map for right now — aim scenes at this, not the whole campaign):
@@ -878,9 +901,13 @@ Succeeds when: {m.get('success_condition', '')}
 Fails when (a real, accumulated narrative state — NOT a single failed roll): {m.get('failure_condition', '')}
 Must reveal to the player before this milestone ends: {m.get('required_reveal') or 'Nothing specific.'}
 Must NOT reveal yet: {m.get('forbidden_reveal') or 'Nothing specific.'}
-Suggested (not mandatory) NPCs for this stretch: {ms_npcs}
-Suggested (not mandatory) location: {ms_loc_line}
-Suggested (not mandatory) encounters: {ms_encounters}
+MILESTONE ROSTER — draw people/enemies/places from HERE. Introduce a NEW one only if the scene
+truly needs something none of these cover, and NEVER with a non-English name:
+- NPCs available this stretch: {ms_npcs}
+- Primary location: {ms_loc_line}
+- Connected places you may move the player between (stay within these instead of inventing new rooms): {ms_sublocs}
+- Interactive objects to build environmental challenges around (doors/chests/levers/altars — resolved by skill checks, not combat): {ms_objects}
+- Enemies you may use if a fight breaks out: {ms_encounters}
 When this milestone's success OR failure condition is clearly met by the story, set
 mechanics.milestone_complete=true, mechanics.milestone_outcome_summary (English, one sentence:
 what actually happened), and mechanics.act_complete (true only if this also satisfies the
@@ -903,6 +930,7 @@ Main conflict: {st['main_conflict']}
 Narrative constraints (never violate): {constraints}
 
 KEY NPCs (proactively place them into scenes rather than passively waiting for the player to seek them out; roleplay consistently; off-screen behavior should surface as rumors/consequences even when unseen.)
+GENDER IS CANON: each NPC below (and the antagonist, and each milestone NPC) has a stated gender — narrate them with EXACTLY those pronouns ("anh ta"/"ông" for male, "cô ta"/"bà" for female) every time, and when you first add one as an entity copy that same gender. NEVER infer gender from a name or switch it between turns.
 {npc_lines}
 
 MAIN ANTAGONIST: {antagonist_line}

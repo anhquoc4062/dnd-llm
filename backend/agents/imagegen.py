@@ -14,6 +14,7 @@ generate ~0.6-0.7s/ảnh trên RTX 4070 Super).
 import asyncio
 import os
 import re
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -22,8 +23,113 @@ import db
 MODEL_ID = "Lykon/dreamshaper-8"
 LCM_LORA_ID = "latent-consistency/lcm-lora-sdv1-5"
 
-STYLE_SUFFIX = "dark fantasy illustration, painterly, dramatic lighting, cinematic composition"
-NEGATIVE_PROMPT = "low quality, blurry, deformed, text, watermark, letters, writing, signature"
+STYLE_SUFFIX = """
+dark fantasy illustration,
+digital painting,
+fantasy concept art,
+tabletop RPG artwork,
+Dungeons & Dragons style,
+painterly,
+cinematic storytelling,
+dynamic composition,
+expressive characters,
+realistic anatomy,
+highly detailed,
+dramatic cinematic lighting,
+rich environmental storytelling,
+medieval fantasy,
+weathered,
+grounded realism,
+masterpiece
+"""
+NEGATIVE_PROMPT = """
+anime,
+manga,
+cartoon,
+chibi,
+3d render,
+cgi,
+plastic skin,
+photograph,
+modern clothing,
+sci-fi,
+cyberpunk,
+oversaturated,
+low quality,
+low detail,
+blurry,
+deformed,
+bad anatomy,
+bad hands,
+extra fingers,
+missing fingers,
+duplicate,
+cropped,
+watermark,
+text,
+logo,
+signature
+"""
+
+# Style RIÊNG theo từng loại ảnh — nối SAU STYLE_SUFFIX chung. Đây là chỗ phân
+# biệt "cảnh gì" (trước đây mọi ảnh dùng chung 1 style nên quái hay ra giống
+# người). Từ khoá lấy theo yêu cầu người dùng.
+KIND_STYLE = {
+    "npc": """
+character portrait,
+upper body framing,
+detailed expressive face,
+travel-worn attire,
+subtle facial detail,
+determined presence
+""",
+    "monster": """
+grotesque creature,
+inhuman monster,
+twisted anatomy,
+unnatural proportions,
+non-human silhouette,
+menacing presence,
+ancient evil,
+full-body creature shot
+""",
+    "location": """
+vast environment,
+epic scale,
+atmospheric perspective,
+immersive scenery,
+environmental storytelling,
+no characters
+""",
+    "object": """
+detailed object study,
+centered focal subject,
+tangible materials,
+intricate surface detail,
+still object,
+no people
+""",
+}
+
+# Style phụ trợ cho cảnh chiến đấu — chỉ nối thêm khi entity là quái/NPC thù
+# địch đang giao chiến (imagegen được gọi kèm cờ combat). KHÔNG phải 1 loại ảnh
+# riêng, chỉ là lớp style động chồng lên.
+COMBAT_STYLE = """
+dynamic action pose,
+sense of motion,
+flying debris,
+intense expression,
+dramatic perspective
+"""
+
+# Negative RIÊNG theo loại — quan trọng nhất: ép quái KHÔNG ra hình người, và
+# ép location/object KHÔNG lòi ra sinh vật (bug thật: ảnh tòa tháp ra 1 con thú
+# khổng lồ vì visual_prompt bị lẫn mô tả quái).
+KIND_NEGATIVE = {
+    "monster": "human face, normal human, humanoid, attractive, symmetrical human anatomy, portrait of a person, cute",
+    "location": "creature, monster, beast, animal, giant creature, humanoid figure, person, people, character, portrait, face",
+    "object": "creature, monster, beast, animal, person, people, character, face, living being",
+}
 
 # Tương đối so với cwd của backend lúc chạy (uvicorn chạy từ trong backend/,
 # xem main.py: StaticFiles(directory="../") -> "../data/..." map ra
@@ -42,6 +148,19 @@ def _slugify(name: str) -> str:
 
 def _image_path(kind: str, name: str) -> str:
     return os.path.join(OUTPUT_ROOT, kind, f"{_slugify(name)}.png")
+
+
+def clear_generated_images():
+    """Xoá toàn bộ ảnh đã generate (location/monster/npc) — gọi lúc tạo nhân
+    vật mới (main.py: /create_character), cùng lúc với DELETE FROM character/
+    history. Game chỉ có 1 save-slot nên ảnh của campaign cũ không còn lý do
+    gì để giữ lại — nếu không xoá, ảnh cache theo tên (xem ensure_context_image)
+    có thể bị TÁI DÙNG NHẦM cho 1 entity/location trùng tên nhưng thuộc
+    campaign hoàn toàn khác (vd 2 campaign khác nhau đều có 1 quái tên
+    "Shadow Wraith" nhưng appearance khác nhau)."""
+    if os.path.isdir(OUTPUT_ROOT):
+        shutil.rmtree(OUTPUT_ROOT)
+    os.makedirs(OUTPUT_ROOT, exist_ok=True)
 
 
 def _get_pipe():
@@ -68,15 +187,33 @@ def _get_pipe():
     return _pipe
 
 
-def _generate_and_save(kind: str, name: str, visual_prompt: str) -> str:
+def _compose_prompt(kind: str, visual_prompt: str, combat: bool) -> tuple[str, str]:
+    """Ghép prompt cuối theo loại: STYLE_SUFFIX chung + KIND_STYLE riêng
+    (+ COMBAT_STYLE nếu đang chiến đấu) + visual_prompt của chủ thể. Trả
+    (prompt, negative_prompt) — negative cũng cộng thêm phần riêng theo loại
+    (vd chặn quái ra hình người)."""
+    parts = [STYLE_SUFFIX.strip(), KIND_STYLE.get(kind, "").strip()]
+    if combat and kind in ("monster", "npc"):
+        parts.append(COMBAT_STYLE.strip())
+    if visual_prompt:
+        parts.append(visual_prompt.strip())
+    prompt = ", ".join(p for p in parts if p)
+
+    neg = NEGATIVE_PROMPT.strip()
+    if kind in KIND_NEGATIVE:
+        neg = f"{neg}, {KIND_NEGATIVE[kind]}"
+    return prompt, neg
+
+
+def _generate_and_save(kind: str, name: str, visual_prompt: str, combat: bool = False) -> str:
     """Chạy TRONG thread pool — blocking, gọi GPU thật. Trả về path tương đối
     (dùng để lưu DB / build URL cho frontend)."""
     pipe = _get_pipe()
-    prompt = f"{STYLE_SUFFIX}, {visual_prompt}" if visual_prompt else STYLE_SUFFIX
+    prompt, negative = _compose_prompt(kind, visual_prompt, combat)
 
     image = pipe(
         prompt=prompt,
-        negative_prompt=NEGATIVE_PROMPT,
+        negative_prompt=negative,
         num_inference_steps=4,
         guidance_scale=1.0,
         width=768,
@@ -98,28 +235,44 @@ def _to_static_url(path: str) -> str:
     return f"/static/{normalized}"
 
 
-async def ensure_context_image(char_id: int, kind: str, name: str, visual_prompt: str):
+async def ensure_context_image(char_id: int, kind: str, name: str, visual_prompt: str, combat: bool = False):
     """Fire-and-forget: gọi qua asyncio.create_task(...), KHÔNG await ở nơi gọi.
     Cache theo (kind, name) — nếu file đã tồn tại thì dùng lại luôn, không
     generate lại. Chỉ ghi context_image_path vào DB nếu context_name hiện tại
-    của nhân vật VẪN còn khớp `name` (tránh race: player đã chuyển sang context
-    khác trong lúc ảnh này còn đang generate)."""
+    VẪN còn khớp `name` (tránh race: player đã chuyển sang context khác trong
+    lúc ảnh này còn đang generate).
+
+    LƯU Ý: context_* nằm ở bảng campaign_state (không phải character — cột cùng
+    tên bên character chỉ là di tích migration cũ, luôn NULL). Trước đây hàm này
+    đọc/ghi nhầm bảng character -> campaign_state.context_image_path không bao
+    giờ được set -> frontend (đọc campaign_state qua /scene_context) poll ảnh
+    mãi không ra. Đã sửa về đúng campaign_state."""
     path = _image_path(kind, name)
 
     if not os.path.exists(path):
         loop = asyncio.get_running_loop()
         try:
-            path = await loop.run_in_executor(_executor, _generate_and_save, kind, name, visual_prompt)
+            path = await loop.run_in_executor(_executor, _generate_and_save, kind, name, visual_prompt, combat)
         except Exception as e:
             print(f"[DEBUG] imagegen: lỗi generate ảnh cho {kind}='{name}': {e}")
             return
 
     conn = db.get_conn()
-    row = conn.execute("SELECT context_name FROM character WHERE id = ?", (char_id,)).fetchone()
+    row = conn.execute("SELECT context_name FROM campaign_state WHERE character_id = ?", (char_id,)).fetchone()
     if row and (row["context_name"] or "") == name:
         conn.execute(
-            "UPDATE character SET context_image_path = ? WHERE id = ?",
+            "UPDATE campaign_state SET context_image_path = ? WHERE character_id = ?",
             (_to_static_url(path), char_id),
         )
         conn.commit()
     conn.close()
+
+def entity_image_url(kind: str, name: str) -> str | None:
+    """URL ảnh đã generate cho 1 entity (monster/npc) trong panel "Trong cảnh",
+    dùng làm avatar thay emoji khi đã có sẵn — KHÔNG tự generate mới ở đây
+    (ensure_context_image mới là nơi generate, chạy khi entity đó từng là
+    context chính). Trả None nếu chưa có ảnh -> frontend fallback về emoji."""
+    if not kind or not name:
+        return None
+    path = _image_path(kind, name)
+    return _to_static_url(path) if os.path.isfile(path) else None

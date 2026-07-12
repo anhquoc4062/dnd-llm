@@ -75,7 +75,7 @@
         <div id="weakness-container" class="trait-list"></div>
       </section>
 
-      <section class="section">
+      <section class="section" id="campaign-section">
         <div class="section-head">
           <span class="section-num">06</span>
           <h2>Kịch Bản Phiêu Lưu</h2>
@@ -174,11 +174,10 @@
 <div id="setup-modal-overlay" class="setup-modal-overlay hidden">
   <div class="setup-modal">
     <h2 class="setup-modal-title">⚔️ Đang Dựng Thế Giới…</h2>
-    <ul class="setup-steps">
-      <li id="setup-step-bible" class="setup-step" data-stage="bible">Đang dựng thế giới…</li>
-      <li id="setup-step-milestone" class="setup-step" data-stage="milestone">Đang chuẩn bị chặng đầu…</li>
-      <li id="setup-step-opening" class="setup-step" data-stage="opening">Đang mở màn…</li>
-    </ul>
+    <div class="setup-progress-bar">
+      <div id="setup-progress-fill" class="setup-progress-fill"></div>
+    </div>
+    <p id="setup-progress-label" class="setup-progress-label">Đang dựng thế giới… (0%)</p>
     <p id="setup-error-text" class="setup-error hidden"></p>
     <button type="button" id="setup-retry-btn" class="secondary-btn hidden">Thử lại</button>
   </div>

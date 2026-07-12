@@ -49,6 +49,8 @@ _DEFAULT_MILESTONE = {
     "forbidden_reveal": "",
     "npcs": [],
     "location": {"name": "", "description": "", "visual_prompt": ""},
+    "sub_locations": [],
+    "interactive_objects": [],
     "possible_encounters": [],
     "possible_rewards": [],
     "next_milestone_hint": "",
@@ -59,6 +61,14 @@ _DEFAULT_MILESTONE = {
 
 def _s(d, key, default=""):
     return str(d.get(key) or default).strip() if isinstance(d, dict) else default
+
+
+def _name_is_english(name: str) -> bool:
+    """Tên roster (npc/quái/location) BẮT BUỘC English — loại bỏ ngay từ khâu
+    SINH milestone những mục có tên chứa chữ cái non-ASCII (tiếng Việt...), để
+    roster không bao giờ mớm sẵn tên sai cho DM (đã thấy DM bịa 'Bóng Người Ẩn'/
+    'Khai Nhan' vào DB). Chặn ở đây rẻ hơn chặn ở tầng DM mỗi lượt."""
+    return not any(ord(ch) > 127 and ch.isalpha() for ch in (name or ""))
 
 
 def _parse_milestone_json(reply: str):
@@ -78,7 +88,7 @@ def _normalize_milestone(obj: dict) -> dict:
 
     npcs = []
     for i, n in enumerate(obj.get("npcs") or []):
-        if isinstance(n, dict) and n.get("name"):
+        if isinstance(n, dict) and n.get("name") and _name_is_english(n.get("name")):
             gender_raw = _s(n, "gender").lower()
             npcs.append({
                 "key": (n.get("key") or n.get("name") or f"npc_{i + 1}").strip().lower().replace(" ", "_"),
@@ -100,15 +110,43 @@ def _normalize_milestone(obj: dict) -> dict:
     else:
         location = dict(_DEFAULT_MILESTONE["location"])
 
+    # sub_locations: các khu vực con NỐI với location chính trong milestone này
+    # — DM được phép di chuyển qua lại giữa chúng thay vì tự bịa nơi mới. Đây là
+    # "catalog địa điểm" để siết location: 1 milestone dài 10-15 lượt cần nhiều
+    # hơn 1 phòng. Chỉ nhận tên English (không dấu tiếng Việt).
+    sub_locations = []
+    for sl in obj.get("sub_locations") or []:
+        if isinstance(sl, dict) and sl.get("name") and _name_is_english(sl.get("name")):
+            sub_locations.append({
+                "name": _s(sl, "name"),
+                "description": _s(sl, "description"),
+                "visual_prompt": _s(sl, "visual_prompt"),
+            })
+
+    # interactive_objects: vật thể tương tác được (cửa cần phá, rương khoá, đòn
+    # bẩy, bàn thờ, cơ quan...) — KHÔNG phải entity chiến đấu (không HP/AC), giải
+    # bằng skill-check sẵn có. Đây là "nguyên liệu" để DM dựng cảnh tương tác môi
+    # trường thay vì lượt nào cũng chỉ NPC/quái. name English, kèm 'interaction'
+    # gợi ý cách tác động (vd "force open (STR)", "pick lock (DEX)").
+    interactive_objects = []
+    for o in obj.get("interactive_objects") or []:
+        if isinstance(o, dict) and o.get("name") and _name_is_english(o.get("name")):
+            interactive_objects.append({
+                "name": _s(o, "name"),
+                "description": _s(o, "description"),
+                "visual_prompt": _s(o, "visual_prompt"),
+                "interaction": _s(o, "interaction"),
+            })
+
     encounters = []
     for e in obj.get("possible_encounters") or []:
-        if isinstance(e, dict) and e.get("name"):
+        if isinstance(e, dict) and e.get("name") and _name_is_english(e.get("name")):
             encounters.append({
                 "name": _s(e, "name"), "type": _s(e, "type", "monster"),
                 "appearance": _s(e, "appearance"), "visual_prompt": _s(e, "visual_prompt"),
                 "moveset": _s(e, "moveset"), "behavior": _s(e, "behavior"),
             })
-        elif isinstance(e, str) and e.strip():
+        elif isinstance(e, str) and e.strip() and _name_is_english(e):
             encounters.append({"name": e.strip(), "type": "monster", "appearance": "", "visual_prompt": "", "moveset": "", "behavior": ""})
 
     rewards_raw = obj.get("possible_rewards")
@@ -130,6 +168,8 @@ def _normalize_milestone(obj: dict) -> dict:
         "forbidden_reveal": _s(obj, "forbidden_reveal"),
         "npcs": npcs,
         "location": location,
+        "sub_locations": sub_locations,
+        "interactive_objects": interactive_objects,
         "possible_encounters": encounters,
         "possible_rewards": rewards,
         "next_milestone_hint": _s(obj, "next_milestone_hint"),
@@ -214,15 +254,31 @@ leisurely detour this late. If this is early, you have room to breathe.
    be revealed this milestone. Do not reveal truths out of order or too early.
 6. forbidden_reveal: what must NOT be revealed yet (usually the remaining hidden_truths, or
    specifically the final twist) — a short reminder for the DM.
-7. npcs: 0-3 DISPOSABLE npcs for this milestone specifically (name, gender, role, desc, one
-   English sentence appearance, visual_prompt = short comma-separated visual traits for image
-   gen). May reuse a Bible key_npc instead of inventing one if that fits better — then you can
-   omit npcs or list them lightly.
-8. location: ONE disposable location for this milestone (name, description, visual_prompt) —
-   may reuse a Bible major_location, or invent a minor new one scoped to just this milestone.
-9. possible_encounters: 0-3 SUGGESTED (not mandatory) enemies the DM may use if the player's
-   actions lead to a fight here — name, type ("monster"|"npc"), appearance, visual_prompt,
-   moveset, behavior. These do not need to persist after this milestone.
+7. npcs: 2-4 DISPOSABLE npcs for this milestone (name, gender ["male"/"female", REQUIRED for
+   every npc — the DM narrates them with these pronouns, never blank for a person], role, desc,
+   one English sentence appearance, visual_prompt = short comma-separated visual traits for image gen).
+   This is the DM's ROSTER for the milestone — give it enough to work with so it never has to
+   invent an NPC mid-scene. Reuse a Bible key_npc where one fits (list it here too), invent the
+   rest. ALL names MUST be English.
+8. location: ONE primary/entry location for this milestone (name, description, visual_prompt) —
+   may reuse a Bible major_location, or invent a minor new one scoped to this milestone.
+   ALSO provide sub_locations: 2-4 connected sub-areas WITHIN this milestone the player can
+   move between (e.g. for a keep: courtyard, great hall, dungeon, tower) — each with name,
+   description, visual_prompt. A milestone runs ~10-15 turns, so ONE room is not enough; this
+   list is the DM's map so it moves the player through KNOWN places instead of inventing new
+   ones. All location names English.
+9. possible_encounters: 2-4 SUGGESTED enemies the DM may use if the player's actions lead to a
+   fight — name, type ("monster"|"npc"), appearance, visual_prompt, moveset, behavior. Reuse a
+   Bible recurring monster where one fits. This is the DM's enemy ROSTER — give it enough
+   options so it never has to invent a random creature. ALL names MUST be English.
+9b. interactive_objects: 2-3 non-combat things in this milestone the player can physically
+   INTERACT with (NOT creatures) — a barred door, a locked chest, a lever/mechanism, an altar,
+   a sealed vault, a collapsed passage, a corpse to search. Each: name (English), description
+   (what it is + why it matters), visual_prompt (comma-separated visual traits for image gen),
+   interaction (how it's overcome, tied to a stat/skill — e.g. "force open (STR)", "pick the
+   lock (DEX/thieves' tools)", "decipher the runes (INT)"). These give the DM environmental
+   challenges to build scenes around instead of only NPCs/monsters. Resolved by normal skill
+   checks — they have NO hp. ALL names MUST be English.
 10. possible_rewards: 0-3 suggested rewards (items/info/allies) if the player succeeds — light
     suggestions, the DM has final say.
 11. next_milestone_hint: one sentence pointing toward what might plausibly come after, GIVEN
@@ -254,6 +310,8 @@ leisurely detour this late. If this is early, you have room to breathe.
   "required_reveal": "...", "forbidden_reveal": "...",
   "npcs": [{{"key": "snake_case_id", "name": "...", "gender": "male|female", "role": "...", "desc": "...", "appearance": "...", "visual_prompt": "..."}}],
   "location": {{"name": "...", "description": "...", "visual_prompt": "..."}},
+  "sub_locations": [{{"name": "...", "description": "...", "visual_prompt": "..."}}],
+  "interactive_objects": [{{"name": "...", "description": "...", "visual_prompt": "...", "interaction": "..."}}],
   "possible_encounters": [{{"name": "...", "type": "monster|npc", "appearance": "...", "visual_prompt": "...", "moveset": "...", "behavior": "..."}}],
   "possible_rewards": ["..."],
   "next_milestone_hint": "...",

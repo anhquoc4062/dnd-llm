@@ -14,6 +14,32 @@ Nguyên tắc giống hệt cách file chính đang xử lý HP nhân vật:
 """
 
 import sqlite3
+import unicodedata
+
+# đ/Đ không tách thành base+dấu qua NFKD (là chữ cái riêng, không phải tổ hợp)
+# nên phải map tay; các nguyên âm có dấu tiếng Việt (ă â ê ô ơ ư + thanh) thì
+# NFKD tự tách được.
+_VN_SPECIAL = {"đ": "d", "Đ": "D"}
+
+
+def _fold_to_ascii(text: str) -> str:
+    """Bỏ dấu tiếng Việt -> ASCII thuần (Bóng Người Ẩn -> Bong Nguoi An). Dùng
+    để chuẩn hoá KEY entity: model 8B hay sinh key có dấu ('bóng_người_ẩn') rồi
+    lượt sau lại sinh bản không dấu ('bong_nguoi_an') -> 2 key khác nhau cho
+    CÙNG 1 con = trùng lặp/không nhất quán HP. Fold về ASCII trước khi so khớp
+    để 2 biến thể đó gộp làm một."""
+    text = "".join(_VN_SPECIAL.get(ch, ch) for ch in (text or ""))
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
+def _has_non_ascii_letter(text: str) -> bool:
+    """True nếu chuỗi chứa chữ cái ngoài ASCII (dấu hiệu tên tiếng Việt/ngoại
+    ngữ). Monster/NPC name BẮT BUỘC là tiếng Anh (xem system prompt DM) — tên
+    lọt dấu tiếng Việt ('Bóng Người Ẩn', 'Khai Nhan' có 'Ẩn') là entity BỊA sai
+    quy tắc, phải chặn ngay ở backend vì strip_cjk chỉ bắt chữ Hán, không bắt
+    tiếng Việt."""
+    return any(ord(ch) > 127 and ch.isalpha() for ch in (text or ""))
 
 
 def init_entity_tables(conn: sqlite3.Connection):
@@ -168,9 +194,9 @@ def format_entities_context(conn: sqlite3.Connection, character_id: int) -> str:
         "hp_change (negative=damage, positive=heal) — never invent a new key for something "
         "already listed. Set status=\"dead\" when it dies, \"fled\" if it escapes. To drop new "
         "loot, add it to mechanics.loot_dropped with a name and the source key (or null if not "
-        "from a specific creature). IMPORTANT: any NEW monster's power level must respect the "
-        "THREAT SCALING section given elsewhere in context (region, location type, character "
-        "level) — do not introduce a threat above the allowed tier."
+        "from a specific creature). IMPORTANT: prefer a monster/NPC from the current MILESTONE "
+        "ROSTER or CAMPAIGN BIBLE — only invent a new one if none fit, and keep its power level "
+        "sane for the scene (a lightly-armed foe is not a boss)."
     )
 
     return "\n".join(lines)
@@ -180,7 +206,7 @@ def format_entities_context(conn: sqlite3.Connection, character_id: int) -> str:
 # Áp dụng thay đổi từ output của model
 # ---------------------------------------------------------------------------
 
-def apply_entity_changes(conn: sqlite3.Connection, character_id: int, entities_payload, turn_number: int):
+def apply_entity_changes(conn: sqlite3.Connection, character_id: int, entities_payload, turn_number: int, roster_names=None):
     """entities_payload: list of dicts, mỗi dict có thể là:
     - Entity MỚI: {"key", "name", "type", "max_hp", "hp", "hostile", "description"(optional),
       "visual_prompt"(optional) — 2 field sau chỉ dùng để trigger generate ảnh context
@@ -200,7 +226,11 @@ def apply_entity_changes(conn: sqlite3.Connection, character_id: int, entities_p
     for item in entities_payload:
         if not isinstance(item, dict):
             continue
-        key = (item.get("key") or "").strip().lower().replace(" ", "_")
+        # Fold về ASCII NGAY từ đầu: mọi so khớp/insert sau đó dùng key thuần
+        # ASCII -> 'bóng_người_ẩn' và 'bong_nguoi_an' quy về cùng 1 key.
+        key = _fold_to_ascii((item.get("key") or "").strip().lower()).replace(" ", "_")
+        # loại ký tự lạ còn sót (chỉ giữ a-z 0-9 _)
+        key = "".join(ch for ch in key if ch.isalnum() or ch == "_")
         if not key:
             continue
 
@@ -209,10 +239,71 @@ def apply_entity_changes(conn: sqlite3.Connection, character_id: int, entities_p
             (character_id, key),
         ).fetchone()
 
+        # Bug HP entity "nhảy" (vd hp 16 -> hp_change -6 nhưng ra 19): model
+        # nhiều khi gửi lại 1 entity ĐANG SỐNG với key hơi lệch (goblin vs
+        # goblin_a) -> không khớp key -> rơi vào nhánh INSERT và RESET hp về
+        # con số model tự bịa. Cứu vãn: nếu không khớp key, thử khớp theo TÊN
+        # với 1 entity CÒN SỐNG (chỉ 'alive' — để không hồi sinh nhầm quái đã
+        # chết cùng tên khi story cố tình spawn con mới). Khớp được thì coi như
+        # cùng entity, áp hp_change lên state cũ thay vì tạo bản sao reset máu.
+        if not existing:
+            name_norm = (item.get("name") or "").strip().lower()
+            if name_norm:
+                existing = c.execute(
+                    "SELECT * FROM entity WHERE character_id = ? AND status = 'alive' "
+                    "AND LOWER(name) = ? ORDER BY id DESC LIMIT 1",
+                    (character_id, name_norm),
+                ).fetchone()
+                if existing:
+                    print(f"[DEBUG] entities: key='{key}' không khớp nhưng tên '{item.get('name')}' khớp entity sống '{existing['key']}' -> coi là cùng entity (không reset HP)")
+
+        # Payload chỉ mang delta (hp_change/status) nhưng KHÔNG có stats khởi
+        # tạo (max_hp & type) mà lại không khớp entity nào -> đây là cập nhật
+        # cho 1 entity không tồn tại (model bịa key/tên), bỏ qua thay vì tạo
+        # entity ma từ 1 delta.
+        is_delta_only = (
+            item.get("max_hp") is None and item.get("type") is None
+            and (item.get("hp_change") is not None or item.get("status") is not None)
+        )
+        if not existing and is_delta_only:
+            print(f"[DEBUG] entities: bỏ payload delta-only không khớp entity nào (key='{key}')")
+            continue
+
+        # RULE chống RESPAWN: nếu model cố tạo entity MỚI trùng TÊN với 1 entity
+        # đã từng xuất hiện và ĐÃ được giải quyết (không còn 'alive' — dead/fled/
+        # gone) -> KHÔNG cho spawn lại. Đây đúng lỗi người chơi gặp: con "Wraith
+        # of the First Gatekeeper" bị van chống lặp ép rút lui, rồi model triệu
+        # hồi lại y hệt (key lệch nhẹ: ..._2, of_first vs of_the_first...) lượt
+        # sau -> trận đánh không bao giờ kết thúc. Đã resolve thì phải ở yên; nếu
+        # cần mối đe doạ mới, model bắt buộc bịa 1 con KHÁC TÊN. (Không đụng
+        # nhánh 'alive name match' phía trên -> entity đang sống được report lại
+        # với key lệch vẫn gộp bình thường, chỉ chặn khi tạo bản MỚI của con đã
+        # xong.)
+        if not existing and not is_delta_only:
+            name_norm = (item.get("name") or "").strip().lower()
+            if name_norm:
+                resolved_same = c.execute(
+                    "SELECT key, status FROM entity WHERE character_id = ? AND status != 'alive' "
+                    "AND LOWER(name) = ? ORDER BY id DESC LIMIT 1",
+                    (character_id, name_norm),
+                ).fetchone()
+                if resolved_same:
+                    print(f"[DEBUG] entities: CHẶN respawn '{item.get('name')}' — đã xuất hiện & resolved trước đó (status={resolved_same['status']}, key={resolved_same['key']})")
+                    continue
+
         if existing:
             hp_change = _safe_int(item.get("hp_change", 0), 0)
             new_hp = max(0, min(existing["max_hp"], existing["hp"] + hp_change))
             status = item.get("status") or existing["status"]
+            # Không tin status="dead" tự báo nếu hp_change không thực sự đưa
+            # HP về 0 — đúng kiểu lỗi "DM kể vượt quá dice" (model tự thấy
+            # trận đấu đã "xong" trong story rồi báo dead, dù backend chỉ roll
+            # đủ dame để trừ 1 phần máu) — xem ENTITY DEATH RULE trong system
+            # prompt (dungeon_master.py). "fled" vẫn được tin vì không phụ
+            # thuộc HP.
+            if status == "dead" and new_hp > 0:
+                print(f"[DEBUG] entities: '{existing['name']}' được báo status=dead nhưng hp_change chỉ còn {new_hp}/{existing['max_hp']} -> không tin, giữ status cũ")
+                status = existing["status"]
             if new_hp <= 0:
                 status = "dead"
             c.execute(
@@ -220,6 +311,24 @@ def apply_entity_changes(conn: sqlite3.Connection, character_id: int, entities_p
                 (new_hp, status, turn_number, existing["id"]),
             )
         else:
+            # CHẶN entity mới có TÊN non-ASCII (tiếng Việt/ngoại ngữ). Monster/
+            # NPC name bắt buộc English (system prompt DM) — 'Bóng Người Ẩn',
+            # 'Khai Nhan' là entity bịa sai quy tắc, đã thấy lọt vào DB thật vì
+            # strip_cjk chỉ bắt chữ Hán. Bỏ qua thay vì lưu rác: DM narrate xong
+            # sẽ không có bản ghi HP cho nó (nó vốn không nên tồn tại), lượt sau
+            # prompt ép English sẽ tự sửa.
+            if _has_non_ascii_letter(item.get("name")):
+                print(f"[DEBUG] entities: CHẶN entity mới tên non-ASCII (không phải English): {item.get('name')!r} (key={key})")
+                continue
+            # Roster check (mềm — chỉ log): tên không khớp roster bible/milestone
+            # nào -> nhiều khả năng model tự bịa ngoài "thực đơn". Chưa reject
+            # cứng (roster disposable đôi khi rỗng), nhưng log để soi mức độ DM
+            # đi lạc khỏi milestone.
+            if roster_names is not None:
+                nm = (item.get("name") or "").strip().lower()
+                if nm and not any(_fuzzy_match(nm, rn) for rn in roster_names):
+                    print(f"[DEBUG] entities: entity mới '{item.get('name')}' KHÔNG khớp roster bible/milestone (bịa ngoài thực đơn?)")
+
             # Entity mới — sanity check số liệu, không tin tuyệt đối vào model
             max_hp = _safe_int(item.get("max_hp", item.get("hp", 10)), 10)
             max_hp = max(1, min(max_hp, 500))  # chặn số vô lý

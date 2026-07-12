@@ -30,13 +30,26 @@
       <h3 id="context-name" class="context-name hidden"></h3>
       <p id="context-desc" class="context-desc hidden"></p>
     </div>
+
+    <!-- Milestone hiện tại (tiếng Anh, để dễ tracking) — ẩn khi chưa có -->
+    <div id="milestone-panel" class="milestone-panel hidden">
+      <h4 class="milestone-label">🎯 Milestone</h4>
+      <p id="milestone-title" class="milestone-title"></p>
+      <p id="milestone-objective" class="milestone-objective"></p>
+    </div>
+
+    <!-- NPC/quái đang trong cảnh + thanh máu (ẩn khi không có ai) -->
+    <div id="entities-panel" class="entities-panel hidden">
+      <h4 class="entities-title">⚔️ Trong cảnh</h4>
+      <ul id="entities-list"></ul>
+    </div>
   </div>
 
   <!-- ============ GAME ============ -->
   <div id="game-panel">
 
     <div class="panel-header">
-      <p class="eyebrow">Chương II · Cuộc Phiêu Lưu</p>
+      <p class="eyebrow" id="act-label">Chương I · Cuộc Phiêu Lưu</p>
       <h1 id="story-title">⚔️ Hành Trình Bắt Đầu</h1>
     </div>
 
@@ -54,6 +67,15 @@
   <!-- ============ CHARACTER ============ -->
   <div id="character-panel">
     <div class="sheet">
+
+      <div id="panel-menu" class="panel-menu">
+        <button type="button" id="panel-menu-btn" class="panel-menu-btn" title="Tuỳ chọn campaign">⏻</button>
+        <div id="panel-menu-dropdown" class="panel-menu-dropdown hidden">
+          <button type="button" class="panel-menu-item" onclick="handleReplayCampaign('same_character')">🔁 Chơi lại campaign này</button>
+          <button type="button" class="panel-menu-item" onclick="handleReplayCampaign('new_character')">🧑 Chơi lại với nhân vật mới</button>
+          <button type="button" class="panel-menu-item panel-menu-danger" onclick="handleDeleteCampaign()">🗑️ Xoá campaign</button>
+        </div>
+      </div>
 
       <div class="character-card">
         <div class="avatar-wrap">
@@ -161,6 +183,19 @@
 
     <button type="button" id="dice-roll-btn" class="dice-roll-btn">🎲 Tung xúc xắc</button>
     <button type="button" id="dice-continue-btn" class="dice-continue-btn hidden">Tiếp tục</button>
+  </div>
+</div>
+
+<!-- ============ OVERLAY "CHƠI LẠI CAMPAIGN NÀY" (giữ nguyên bible+nhân vật,
+     sinh lại milestone 1 + cảnh mở đầu NỀN — xem /replay_campaign) ============ -->
+<div id="replay-modal-overlay" class="setup-modal-overlay hidden">
+  <div class="setup-modal">
+    <h2 class="setup-modal-title">⚔️ Đang Dựng Lại Thế Giới…</h2>
+    <div class="setup-progress-bar">
+      <div id="replay-progress-fill" class="setup-progress-fill"></div>
+    </div>
+    <p id="replay-progress-label" class="setup-progress-label">Đang chuẩn bị…</p>
+    <p id="replay-error-text" class="setup-error hidden"></p>
   </div>
 </div>
 

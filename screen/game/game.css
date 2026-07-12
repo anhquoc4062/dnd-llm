@@ -555,7 +555,10 @@ li.cooldown {
 
 /* ---------------------------- Context panel (ảnh scene) ---------------------------- */
 
-#context-panel{ display: flex; }
+#context-panel{ 
+  display: flex;
+  flex-direction: column;
+ }
 .context-sheet{
   position: sticky;
   top: 24px;
@@ -646,6 +649,138 @@ li.cooldown {
   margin: 0;
 }
 .context-desc.hidden{ display: none; }
+
+/* --- Milestone hiện tại (tracking, tiếng Anh) --- */
+.milestone-panel{
+  margin-top: 16px;
+  padding: 12px 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--gold);
+  border-radius: 8px;
+}
+.milestone-panel.hidden{ display: none; }
+.milestone-label{
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--gold);
+  margin: 0 0 6px;
+}
+.milestone-title{
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--parchment);
+  margin: 0 0 4px;
+}
+.milestone-objective{
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+  margin: 0;
+}
+
+/* --- NPC/quái trong cảnh + thanh máu --- */
+.entities-panel{
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.entities-panel.hidden{ display: none; }
+.entities-title{
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+#entities-list{ list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+
+.ent-row{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.ent-badge{
+  flex: none;
+  width: 100px;
+  height: 100px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 15px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.ent-badge img{
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.ent-hostile .ent-badge{
+  border-color: var(--ember);
+  box-shadow: 0 0 8px rgba(181,72,47,0.4);
+}
+.ent-friendly .ent-badge{
+  border-color: var(--sage);
+  box-shadow: 0 0 8px rgba(122,154,99,0.35);
+}
+
+.ent-body{ flex: 1; min-width: 0; }
+.ent-head{
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+.ent-name{
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--parchment);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ent-hostile .ent-name{ color: var(--ember-bright); }
+.ent-friendly .ent-name{ color: var(--sage-bright); }
+.ent-hp{
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.ent-bar{
+  height: 8px;
+  background: var(--bg);
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.5);
+}
+.ent-bar-fill{
+  height: 100%;
+  border-radius: 999px;
+  transition: width .3s ease;
+  background: linear-gradient(90deg, var(--sage), var(--sage-bright));
+  box-shadow: 0 0 6px rgba(150,187,124,0.5);
+}
+.ent-hostile .ent-bar-fill{
+  background: linear-gradient(90deg, var(--ember), var(--ember-bright));
+  box-shadow: 0 0 6px rgba(216,97,63,0.5);
+}
 
 /* --- Changes log (nhật ký thay đổi) --- */
 .msg.log{
@@ -740,6 +875,18 @@ li.cooldown {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+}
+
+.turn-levelup{
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  margin-top: 6px;
+  display: inline-block;
+  background: rgba(200,160,60,0.14);
+  color: var(--gold-bright);
+  border: 1px solid rgba(200,160,60,0.35);
 }
 
 .log-entry{
@@ -1038,3 +1185,113 @@ li.cooldown {
   #assistant-panel{ right: 12px; left: 12px; width: auto; bottom: 84px; }
   #assistant-toggle{ right: 16px; bottom: 16px; }
 }
+
+/* --- Dropdown menu (góc trên-trái character panel): chơi lại / xoá campaign --- */
+.panel-menu{
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 5;
+}
+.panel-menu-btn{
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+  font-size: 14px;
+  cursor: pointer;
+  transition: border-color .15s ease, color .15s ease;
+}
+.panel-menu-btn:hover{ border-color: var(--gold); color: var(--gold-bright); }
+
+.panel-menu-dropdown{
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  min-width: 220px;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: 0 0 0 1px rgba(202,164,86,0.06), 0 16px 32px rgba(0,0,0,0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.panel-menu-dropdown.hidden{ display: none; }
+
+.panel-menu-item{
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--parchment-dim);
+  font-family: var(--font-body);
+  font-size: 13px;
+  padding: 9px 10px;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.panel-menu-item:hover{ background: rgba(202,164,86,0.12); color: var(--parchment); }
+.panel-menu-item.panel-menu-danger{ color: var(--ember-bright); }
+.panel-menu-item.panel-menu-danger:hover{ background: rgba(181,72,47,0.14); color: var(--ember-bright); }
+
+/* --- Overlay "Đang dựng lại thế giới" (chơi lại campaign này) — style vay
+   mượn từ .setup-modal-overlay bên style.css (index.html), game.html không
+   link style.css nên khai báo lại riêng ở đây. --- */
+.setup-modal-overlay{
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(8,6,4,0.78);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+.setup-modal-overlay.hidden{ display: none; }
+
+.setup-modal{
+  width: 100%; max-width: 420px;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 28px;
+  box-shadow: 0 0 0 1px rgba(202,164,86,0.06), 0 20px 60px rgba(0,0,0,0.5);
+  text-align: center;
+}
+.setup-modal-title{
+  font-family: var(--font-display);
+  font-size: 20px;
+  color: var(--gold-bright);
+  margin: 0 0 22px;
+}
+.setup-progress-bar{
+  width: 100%;
+  height: 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 0 0 12px;
+}
+.setup-progress-fill{
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--gold), var(--gold-bright));
+  border-radius: 999px;
+  transition: width .5s ease;
+}
+.setup-progress-label{
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0 0 18px;
+  text-align: left;
+}
+.setup-error{
+  font-size: 13px;
+  color: var(--ember-bright);
+  margin: 0 0 14px;
+}
+.setup-error.hidden{ display: none; }

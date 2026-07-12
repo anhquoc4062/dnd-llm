@@ -25,9 +25,11 @@ const state = {
   skills: [],      // [{key, vi, en}]
   items: [],       // [{key, vi, en}]
   campaignMode: 'ai',      // 'ai' | 'custom'
-  campaignHooks: [],       // 5 câu hook ngắn để CHỌN — không còn bước "xác nhận"/khai triển riêng ở đây
-  campaignTheme: '',       // hook đã chọn (mode 'ai') hoặc text tự viết (mode 'custom') — gửi RAW lúc tạo
+  campaignSeeds: [],       // 5 câu campaign seed ngắn để CHỌN — không còn bước "xác nhận"/khai triển riêng ở đây
+  campaignTheme: '',       // seed đã chọn (mode 'ai') hoặc text tự viết (mode 'custom') — gửi RAW lúc tạo
                             // nhân vật, backend tự khai triển đầy đủ Campaign Bible ở bước sau (modal tiến trình)
+  reuseBible: false,        // true khi vào từ "Chơi lại campaign với nhân vật mới" (?reuse_bible=1) — giữ
+                            // nguyên thế giới/cốt truyện đã có, bỏ hẳn bước chọn kịch bản bên dưới
 };
 
 /* ---------------------------- UTIL -------------------------------------- */
@@ -284,11 +286,11 @@ function renderLoadout(){
 }
 
 /* ---------------------------- CAMPAIGN SEED ------------------------------- */
-/* Người chơi chỉ CHỌN 1 hook (hoặc viết ý tưởng riêng) — không còn bước
-   "xác nhận kịch bản"/khai triển riêng ở màn này. state.campaignTheme giữ
-   nguyên văn (raw) hook đã chọn/text đã gõ, gửi thẳng lên backend lúc bấm
-   "Khởi tạo nhân vật" — backend tự khai triển đầy đủ Campaign Bible trong
-   lúc hiện modal tiến trình (xem showSetupModal()). */
+/* Người chơi chỉ CHỌN 1 campaign seed (hoặc viết ý tưởng riêng) — không còn
+   bước "xác nhận kịch bản"/khai triển riêng ở màn này. state.campaignTheme
+   giữ nguyên văn (raw) seed đã chọn/text đã gõ, gửi thẳng lên backend lúc
+   bấm "Khởi tạo nhân vật" — backend tự khai triển đầy đủ Campaign Bible
+   trong lúc hiện modal tiến trình (xem showSetupModal()). */
 
 function setCampaignStatus(msg){
   byId('campaign-status').textContent = msg || '';
@@ -311,18 +313,18 @@ async function generateCampaignSeeds(){
   state.campaignTheme = '';
   setCampaignStatus('⏳ Đang nghĩ ra 5 câu mở đầu…');
   try{
-    const res = await fetch('/campaign_hooks');
+    const res = await fetch('/campaign_seeds');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
-    state.campaignHooks = Array.isArray(data.hooks) ? data.hooks : [];
-    select.innerHTML = state.campaignHooks.length
+    state.campaignSeeds = Array.isArray(data.seeds) ? data.seeds : [];
+    select.innerHTML = state.campaignSeeds.length
       ? '<option value="">— Chọn 1 kịch bản —</option>' +
-        state.campaignHooks.map((h, i) => `<option value="${i}">${h}</option>`).join('')
+        state.campaignSeeds.map((s, i) => `<option value="${i}">${s}</option>`).join('')
       : '<option value="">— Không tạo được kịch bản, thử lại —</option>';
     select.disabled = false;
-    setCampaignStatus(state.campaignHooks.length ? 'Chọn 1 kịch bản.' : 'Không tạo được kịch bản. Hãy thử lại.');
+    setCampaignStatus(state.campaignSeeds.length ? 'Chọn 1 kịch bản.' : 'Không tạo được kịch bản. Hãy thử lại.');
   } catch(e){
-    console.error('Không thể tạo campaign hooks:', e);
+    console.error('Không thể tạo campaign seeds:', e);
     setCampaignStatus('Lỗi kết nối server khi tạo kịch bản. Kiểm tra backend đã chạy chưa.');
   } finally {
     btn.disabled = false;
@@ -336,7 +338,7 @@ function initCampaignSeed(){
   byId('campaign-generate-btn').addEventListener('click', generateCampaignSeeds);
   byId('campaign-select').addEventListener('change', (e) => {
     const idx = e.target.value;
-    state.campaignTheme = idx === '' ? '' : (state.campaignHooks[Number(idx)] || '');
+    state.campaignTheme = idx === '' ? '' : (state.campaignSeeds[Number(idx)] || '');
   });
   byId('campaign-custom-text').addEventListener('input', (e) => {
     state.campaignTheme = e.target.value.trim();
@@ -411,7 +413,7 @@ function startAdventure(){
   if (!state.classId){ showError('Hãy chọn một chức nghiệp.'); return; }
   if (state.strengths.length !== 1){ showError('Hãy chọn 1 điểm mạnh.'); return; }
   if (state.weaknesses.length !== 1){ showError('Hãy chọn 1 điểm yếu.'); return; }
-  if (!state.campaignTheme.trim()){ showError('Hãy chọn hoặc viết 1 kịch bản phiêu lưu.'); return; }
+  if (!state.reuseBible && !state.campaignTheme.trim()){ showError('Hãy chọn hoặc viết 1 kịch bản phiêu lưu.'); return; }
 
   randomizeLoadout();
   renderLoadout();
@@ -439,6 +441,7 @@ function startAdventure(){
     items: state.items,
     campaignTheme: state.campaignTheme.trim(),
     campaignMode: state.campaignMode,
+    reuseBible: state.reuseBible,
     createdAt: new Date().toISOString(),
   };
 
@@ -479,24 +482,28 @@ async function saveToBackend(character){
    đang ở bước nào, tạo cảm giác "đang dựng thế giới" thay vì màn hình trắng
    chờ đợi không rõ lý do. */
 
-const SETUP_STAGE_ORDER = ['bible', 'milestone', 'opening', 'ready'];
+// Nhãn hiển thị cho từng stage — % thật đi kèm đến từ backend (xem
+// main.py: _SETUP_STAGE_PERCENT), frontend không tự tính lại để tránh 2 nơi
+// định nghĩa cùng 1 con số rồi lệch nhau.
+const SETUP_STAGE_LABEL = {
+  bible: 'Đang dựng thế giới…',
+  milestone: 'Đang thêu dệt chặng đầu…',
+  opening: 'Đang dựng màn đầu…',
+  ready: 'Đã sẵn sàng!',
+};
 let setupPollTimer = null;
 
 function openSetupModal(){
   byId('setup-modal-overlay').classList.remove('hidden');
   byId('setup-error-text').classList.add('hidden');
   byId('setup-retry-btn').classList.add('hidden');
-  updateSetupModal('bible');
+  updateSetupModal('bible', 0);
 }
 
-function updateSetupModal(stage){
-  const currentIdx = SETUP_STAGE_ORDER.indexOf(stage);
-  ['bible', 'milestone', 'opening'].forEach((s) => {
-    const el = byId('setup-step-' + s);
-    const idx = SETUP_STAGE_ORDER.indexOf(s);
-    el.classList.toggle('done', currentIdx > idx);
-    el.classList.toggle('active', currentIdx === idx);
-  });
+function updateSetupModal(stage, percent){
+  const p = Math.max(0, Math.min(100, Number(percent) || 0));
+  byId('setup-progress-fill').style.width = p + '%';
+  byId('setup-progress-label').textContent = `${SETUP_STAGE_LABEL[stage] || 'Đang xử lý…'} (${p}%)`;
 }
 
 async function pollSetupStatus(){
@@ -518,13 +525,13 @@ async function pollSetupStatus(){
     return;
   }
 
+  updateSetupModal(data.stage || 'bible', data.percent);
+
   if (data.stage === 'ready'){
-    updateSetupModal('ready');
     window.location.href = '/game';
     return;
   }
 
-  updateSetupModal(data.stage || 'bible');
   setupPollTimer = setTimeout(pollSetupStatus, 1500);
 }
 
@@ -578,7 +585,20 @@ function init(){
 
   initCampaignSeed();
   initSetupModal();
+  initReuseBible();
   recalcAndRender();
+}
+
+/** "Chơi lại campaign với nhân vật mới" (game.html) redirect về đây kèm
+ * ?reuse_bible=1 — giữ nguyên thế giới/cốt truyện đã có (bible không đổi),
+ * nên ẩn hẳn phần chọn kịch bản (không còn ý nghĩa) và bỏ qua bước sinh Bible
+ * ở backend (xem main.py: create_character reuseBible). */
+function initReuseBible(){
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('reuse_bible') !== '1') return;
+  state.reuseBible = true;
+  const section = byId('campaign-section');
+  if (section) section.classList.add('hidden');
 }
 
 document.addEventListener('DOMContentLoaded', init);

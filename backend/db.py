@@ -1,6 +1,15 @@
 """
 db.py — SQLite access + character-row helpers dùng chung giữa main.py, dm.py,
 assistant.py. Tách riêng khỏi main.py để main.py chỉ còn chứa route handlers.
+
+2 bảng chính, tách RÕ 2 khái niệm khác nhau:
+- `character`: CHỈ thông tin nhân vật (tên/chỉ số/trang bị/kỹ năng...) — thứ
+  người chơi thực sự "sở hữu", gần như tĩnh trong 1 phiên chơi.
+- `campaign_state`: TOÀN BỘ state của phiên chơi/campaign hiện tại (turn số
+  mấy, đang ở milestone nào, story_state, context panel, pending_action...)
+  — đổi liên tục mỗi turn, không phải "thông tin nhân vật". 1:1 với character
+  (character_id làm PK luôn, không cần AUTOINCREMENT riêng vì mỗi lúc chỉ có
+  đúng 1 character — xem "single save-slot" trong main.py).
 """
 
 import json
@@ -9,6 +18,10 @@ import sqlite3
 from agents import classification, entities, campaign
 
 DB_PATH = "game.db"
+
+# Cột nào của campaign_state PHẢI sống sót qua pre-turn restore (retry) —
+# xem _snapshot_pre_turn/_restore_pre_turn ở dungeon_master.py.
+_STATE_SURVIVE_RESTORE = ("pending_action", "pre_turn_snapshot", "last_turn_resolution")
 
 
 def get_conn():
@@ -59,44 +72,87 @@ def init_db():
         CREATE TABLE IF NOT EXISTS history(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             role TEXT,
-            content TEXT
+            content TEXT,
+            turn_number INTEGER DEFAULT 0
         )
     """)
 
+    # Xem docstring đầu file — toàn bộ state "phiên chơi", KHÔNG phải "nhân vật".
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS campaign_state(
+            character_id INTEGER PRIMARY KEY,
+            region TEXT,
+            campaign_theme TEXT,
+            current_turn INTEGER DEFAULT 0,
+            history_summary TEXT,
+            summarized_up_to_turn INTEGER DEFAULT 0,
+            campaign_act_index INTEGER DEFAULT 0,
+            campaign_milestone_number INTEGER DEFAULT 0,
+            milestone_advanced_turn INTEGER DEFAULT 0,
+            current_milestone TEXT,
+            story_state TEXT,
+            last_result TEXT,
+            last_turn_resolution TEXT,
+            pending_action TEXT,
+            pre_turn_snapshot TEXT,
+            context_kind TEXT,
+            context_name TEXT,
+            context_name_vi TEXT,
+            context_desc TEXT,
+            context_image_path TEXT,
+            setup_stage TEXT,
+            setup_error TEXT
+        )
+    """)
     conn.commit()
 
-    # RAG: bảng entity (NPC/quái sinh động) + world_loot (ledger loot)
-    entities.init_entity_tables(conn)
+    # Migration: DB tạo trước khi có cột context_name_vi (tên hiển thị tiếng
+    # Việt cho context panel — context_name vẫn giữ tên English canonical dùng
+    # cho cache ảnh/khớp race trong imagegen).
+    existing_state_cols = {row["name"] for row in c.execute("PRAGMA table_info(campaign_state)")}
+    if "context_name_vi" not in existing_state_cols:
+        c.execute("ALTER TABLE campaign_state ADD COLUMN context_name_vi TEXT")
+        conn.commit()
 
-    # Cho phép nâng cấp DB cũ (được tạo trước khi có race_en/character_class_en)
-    # mà không cần xoá file game.db thủ công.
-    existing_cols = {row["name"] for row in c.execute("PRAGMA table_info(character)")}
-    int_cols_default_0 = (
-        "turns_since_event", "weather_since_turn", "current_turn", "summarized_up_to_turn",
-        "campaign_milestone_index", "milestone_advanced_turn",
-        "campaign_act_index", "campaign_milestone_number",
-    )
-    for col in ("race_en", "character_class_en", "turns_since_event", "region", "npc_pool",
-                "last_result", "weather", "weather_since_turn", "current_turn",
-                "history_summary", "summarized_up_to_turn", "campaign_theme", "campaign_data",
-                "campaign_milestone_index", "pre_turn_snapshot", "milestone_advanced_turn",
-                "pending_action", "last_turn_resolution",
-                "context_kind", "context_name", "context_desc", "context_image_path",
-                "campaign_act_index", "campaign_milestone_number", "current_milestone",
-                "story_state", "setup_stage", "setup_error"):
-        if col not in existing_cols:
-            if col in int_cols_default_0:
-                c.execute(f"ALTER TABLE character ADD COLUMN {col} INTEGER DEFAULT 0")
-            else:
-                c.execute(f"ALTER TABLE character ADD COLUMN {col} TEXT")
-    conn.commit()
-
-    # Migration bảng history: thêm cột turn_number (đánh dấu row thuộc turn
-    # nào) — cần cho cơ chế summarization (biết row nào đã gộp vào summary).
+    # Migration: DB tạo trước khi có bảng history.turn_number.
     existing_history_cols = {row["name"] for row in c.execute("PRAGMA table_info(history)")}
     if "turn_number" not in existing_history_cols:
         c.execute("ALTER TABLE history ADD COLUMN turn_number INTEGER DEFAULT 0")
-    conn.commit()
+        conn.commit()
+
+    # Migration: DB tạo TRƯỚC khi tách bảng campaign_state (các cột session
+    # từng nằm lẫn trong character) -> copy sang bảng mới cho campaign đang
+    # chơi dở, rồi thôi không đụng cột cũ đó nữa (không DROP COLUMN — không
+    # phải bản SQLite nào cũng hỗ trợ tốt, để lại vô hại vì code không còn
+    # đọc/ghi chúng).
+    existing_char_cols = {row["name"] for row in c.execute("PRAGMA table_info(character)")}
+    legacy_session_cols = [
+        "region", "campaign_theme", "current_turn",
+        "history_summary", "summarized_up_to_turn", "campaign_act_index",
+        "campaign_milestone_number", "milestone_advanced_turn", "current_milestone",
+        "story_state", "last_result", "last_turn_resolution", "pending_action",
+        "pre_turn_snapshot", "context_kind", "context_name", "context_desc",
+        "context_image_path", "setup_stage", "setup_error",
+    ]
+    if any(col in existing_char_cols for col in legacy_session_cols):
+        rows = c.execute("SELECT * FROM character").fetchall()
+        for row in rows:
+            already = c.execute(
+                "SELECT 1 FROM campaign_state WHERE character_id = ?", (row["id"],)
+            ).fetchone()
+            if already:
+                continue  # server đã chạy lại sau lần migrate trước -> bỏ qua
+            row_keys = row.keys()
+            values = [row[col] if col in row_keys else None for col in legacy_session_cols]
+            c.execute(
+                f"INSERT INTO campaign_state (character_id, {', '.join(legacy_session_cols)}) "
+                f"VALUES (?, {', '.join('?' * len(legacy_session_cols))})",
+                (row["id"], *values),
+            )
+        conn.commit()
+
+    # RAG: bảng entity (NPC/quái sinh động) + world_loot (ledger loot)
+    entities.init_entity_tables(conn)
 
     conn.close()
 
@@ -130,50 +186,54 @@ def _load_json(text, default=None):
         return default if default is not None else []
 
 
-def _load_json_dict(text):
-    """Biến thể của _load_json nhưng default {} thay vì [] — dùng cho các
-    cột lưu dict (vd npc_pool: {archetype_key: generated_name})."""
-    if not text:
-        return {}
-    try:
-        result = json.loads(text)
-        return result if isinstance(result, dict) else {}
-    except (TypeError, json.JSONDecodeError):
-        return {}
-
-
-def _load_campaign_bible(char) -> dict | None:
-    """Campaign Bible giờ ưu tiên đọc từ file JSON riêng (xem agents/campaign.py:
-    save/load_campaign_bible) — dễ mở lên xem/theo dõi hơn hẳn so với 1 cột
-    TEXT lớn trong SQLite. Fallback về cột campaign_data cũ trong DB chỉ để
-    đọc ngược các save được tạo TRƯỚC khi có cơ chế file này."""
-    bible = campaign.load_campaign_bible()
-    if bible:
-        return bible
-    campaign_data_raw = char["campaign_data"] if "campaign_data" in char.keys() else None
-    if campaign_data_raw:
-        try:
-            return json.loads(campaign_data_raw)
-        except (TypeError, json.JSONDecodeError):
-            return None
-    return None
-
-
-def save_current_milestone(char_id: int, milestone: dict):
-    """Milestone hiện tại (khác Campaign Bible — đổi liên tục mỗi khi hoàn
-    thành 1 cái, không tĩnh như bible) — lưu thẳng vào cột DB (JSON), không
-    cần file riêng."""
+def create_campaign_state(char_id: int):
+    """Tạo row campaign_state RỖNG cho nhân vật MỚI — gọi ngay sau khi INSERT
+    character, nếu không thì mọi UPDATE campaign_state SET ... WHERE
+    character_id=? sau đó sẽ không match dòng nào."""
     conn = get_conn()
+    conn.execute("INSERT OR IGNORE INTO campaign_state (character_id) VALUES (?)", (char_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_campaign_state(char_id: int) -> sqlite3.Row | None:
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM campaign_state WHERE character_id = ?", (char_id,)).fetchone()
+    conn.close()
+    return row
+
+
+def update_campaign_state(char_id: int, **fields):
+    """Update nhiều cột campaign_state cùng lúc bằng keyword args — thay cho
+    việc viết tay từng câu UPDATE ... SET x=? WHERE character_id=? rải rác
+    khắp dungeon_master.py."""
+    if not fields:
+        return
+    conn = get_conn()
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
     conn.execute(
-        "UPDATE character SET current_milestone = ? WHERE id = ?",
-        (json.dumps(milestone, ensure_ascii=False), char_id),
+        f"UPDATE campaign_state SET {set_clause} WHERE character_id = ?",
+        (*fields.values(), char_id),
     )
     conn.commit()
     conn.close()
 
 
-def load_current_milestone(char) -> dict | None:
-    raw = char["current_milestone"] if "current_milestone" in char.keys() else None
+def _load_campaign_bible() -> dict | None:
+    """Campaign Bible đọc từ file JSON riêng (xem agents/campaign.py:
+    save/load_campaign_bible) — dễ mở lên xem/theo dõi hơn hẳn so với 1 cột
+    TEXT lớn trong SQLite."""
+    return campaign.load_campaign_bible()
+
+
+def save_current_milestone(char_id: int, milestone: dict):
+    """Milestone hiện tại (khác Campaign Bible — đổi liên tục mỗi khi hoàn
+    thành 1 cái, không tĩnh như bible) — lưu vào campaign_state.current_milestone."""
+    update_campaign_state(char_id, current_milestone=json.dumps(milestone, ensure_ascii=False))
+
+
+def load_current_milestone(state: sqlite3.Row | None) -> dict | None:
+    raw = state["current_milestone"] if state and "current_milestone" in state.keys() else None
     if not raw:
         return None
     try:
@@ -234,8 +294,6 @@ def character_row_to_dict(char: sqlite3.Row) -> dict:
         "race_en": char["race_en"] or char["race"],
         "character_class": char["character_class"],
         "character_class_en": char["character_class_en"] or char["character_class"],
-        "region": char["region"] if "region" in char.keys() else None,
-        # "npc_pool": _load_json_dict(char["npc_pool"] if "npc_pool" in char.keys() else None),
         "attrs": {
             "str": char["attr_str"],
             "dex": char["attr_dex"],

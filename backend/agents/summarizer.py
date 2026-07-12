@@ -14,7 +14,8 @@ Thiết kế: rolling summary + sliding window gần nhất.
 
 import ollama
 
-SUMMARY_MODEL = "qwen3:14b"
+# SUMMARY_MODEL = "qwen3:14b"
+SUMMARY_MODEL = "qwen3:8b"
 SUMMARY_OPTIONS = {"num_ctx": 4096, "num_predict": 400}
 
 # Khi số turn CHƯA gộp vào summary vượt ngưỡng này -> trigger tóm tắt. Đây

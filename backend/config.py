@@ -1,4 +1,5 @@
-MODEL = "qwen3:14b"
+MODEL = "qwen3:8b"
+# MODEL = "qwen3:14b"
 # MODEL = "mistral-small:22b"
 # MODEL = "phi4:14b"
 # MODEL = "mistral-nemo:12b"

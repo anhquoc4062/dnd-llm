@@ -231,6 +231,13 @@ function escapeHtml(str){
   return div.innerHTML;
 }
 
+/* Tên item/skill "thật" — loại bỏ rỗng, null, và chuỗi rác "null"/"none" mà
+   backend đôi khi lỡ đưa vào (tránh render "Sử dụng: null"). */
+function isRealName(name){
+  const s = (name == null ? '' : String(name)).trim().toLowerCase();
+  return s !== '' && s !== 'null' && s !== 'none' && s !== 'undefined';
+}
+
 /* Riêng cho attribute HTML (vd title="...") — escapeHtml() ở trên KHÔNG escape
    dấu " vì nó chỉ escape đúng cho text node, không an toàn khi nhét vào giữa
    một attribute value có dấu ngoặc kép. */
@@ -342,6 +349,9 @@ function finishTurn(data, userBubble){
         showGameOver();
     }
 
+    renderEntities(data.active_entities);
+    if (data.act_index !== undefined) updateActLabel(data.act_index);
+
     loadCharacter();
     fetchAndRenderContext();
     setInputsEnabled(true);
@@ -360,6 +370,9 @@ function renderContext(ctx){
     const empty = byId('context-empty');
     const nameEl = byId('context-name');
     const descEl = byId('context-desc');
+
+    renderMilestone(ctx);
+    if (ctx) updateActLabel(ctx.act_index, ctx.act_title);
 
     if (!ctx || !ctx.name) {
         img.classList.add('hidden');
@@ -386,6 +399,68 @@ function renderContext(ctx){
         img.classList.add('hidden');
         placeholder.classList.remove('hidden');
     }
+}
+
+/** Milestone hiện tại — hiện giữa ảnh cảnh và danh sách NPC/quái, tiếng Anh
+ * (lấy thẳng từ Bible/milestone, chỉ để người chơi dễ TRACKING đang làm gì,
+ * không phải lời thoại trong truyện). */
+function renderMilestone(ctx){
+    const panel = byId('milestone-panel');
+    if (!panel) return;
+    if (!ctx || !ctx.milestone_title){
+        panel.classList.add('hidden');
+        return;
+    }
+    panel.classList.remove('hidden');
+    byId('milestone-title').textContent = ctx.milestone_title;
+    byId('milestone-objective').textContent = ctx.milestone_objective || '';
+}
+
+/** Vẽ danh sách NPC/quái đang có trong cảnh kèm thanh máu — trước đây backend
+ * track HP quái đúng nhưng UI không hiện, người chơi tưởng đánh "vô dụng". */
+function renderEntities(list){
+    const panel = byId('entities-panel');
+    const ul = byId('entities-list');
+    if (!panel || !ul) return;
+    const items = (list || []).filter(e => e && e.name);
+    if (items.length === 0){
+        panel.classList.add('hidden');
+        ul.innerHTML = '';
+        return;
+    }
+    panel.classList.remove('hidden');
+    ul.innerHTML = items.map(e => {
+        const max = Math.max(1, e.max_hp || 1);
+        const hp = Math.max(0, Math.min(max, e.hp == null ? max : e.hp));
+        const pct = (hp / max) * 100;
+        const icon = e.hostile ? '👹' : (e.type === 'monster' ? '🐾' : '🧑');
+        const cls = e.hostile ? 'ent-hostile' : 'ent-friendly';
+        const badge = e.image_path
+            ? `<img src="${e.image_path}" alt="${escapeHtml(e.name)}">`
+            : icon;
+        return `<li class="ent-row ${cls}">`
+            + `<div class="ent-badge">${badge}</div>`
+            + `<div class="ent-body">`
+            + `<div class="ent-head"><span class="ent-name">${escapeHtml(e.name)}</span>`
+            + `<span class="ent-hp">${hp}/${max}</span></div>`
+            + `<div class="ent-bar"><div class="ent-bar-fill" style="width:${pct}%"></div></div>`
+            + `</div></li>`;
+    }).join('');
+}
+
+/** Nhãn "Chương" trên header, suy từ act_index (0/1/2 -> I/II/III), kèm tên
+ * act (purpose lấy từ Campaign Bible, tiếng Anh) nếu có. actTitle chỉ đến từ
+ * /scene_context (renderContext) — các nơi khác chỉ có act_index nên gọi
+ * updateActLabel(actIndex) trơn, hàm tự nhớ lại title cũ (_lastActTitle) thay
+ * vì xoá mất chữ đã hiện trước đó. Trước đây bị hardcode "Chương II" nên sai
+ * ngay từ đầu game. */
+let _lastActTitle = null;
+function updateActLabel(actIndex, actTitle){
+    const el = byId('act-label');
+    if (!el) return;
+    if (actTitle !== undefined) _lastActTitle = actTitle;
+    const roman = ['I', 'II', 'III'][Math.max(0, Math.min(2, actIndex || 0))] || 'I';
+    el.textContent = _lastActTitle ? `Chương ${roman} · ${_lastActTitle}` : `Chương ${roman} · Cuộc Phiêu Lưu`;
 }
 
 /** Lấy context hiện tại từ backend, render ngay (tên/mô tả luôn có sẵn đồng
@@ -624,6 +699,9 @@ async function retryLastTurn(){
             showGameOver();
         }
 
+        renderEntities(data.active_entities);
+        if (data.act_index !== undefined) updateActLabel(data.act_index);
+
         loadCharacter();
         fetchAndRenderContext();
     } catch (e) {
@@ -655,6 +733,13 @@ async function startStory() {
         addMessage('dm', data.story);
         // 3. Render 4 nút lựa chọn
         renderChoices(data.choices);
+
+        renderEntities(data.active_entities);
+        if (data.act_index !== undefined) updateActLabel(data.act_index);
+
+        if (data.mechanics && (data.mechanics.is_dead || data.mechanics.character_died)) {
+            showGameOver();
+        }
 
     } catch(e) {
         console.error('Lỗi khi mở màn:', e);
@@ -738,12 +823,21 @@ function renderDmTurn(data) {
     if (changes.mana)  entries.push(`🔷 Mana ${changes.mana > 0 ? '+' : ''}${changes.mana}`);
     if (changes.gold)  entries.push(`💰 Vàng ${changes.gold > 0 ? '+' : ''}${changes.gold}`);
     if (changes.xp)    entries.push(`⭐ XP ${changes.xp > 0 ? '+' : ''}${changes.xp}`);
-    (changes.items_added || []).forEach(name => entries.push(`🎒 Nhận: ${escapeHtml(name)}`));
-    (changes.items_removed || []).forEach(name => entries.push(`🖐️ Sử dụng: ${escapeHtml(name)}`));
+    // Lọc tên rỗng/null trước khi render — tránh in "🎒 Nhận: null" / "🖐️ Sử
+    // dụng: null" khi backend lỡ đưa giá trị null/"null" vào mảng.
+    (changes.items_added || []).filter(isRealName).forEach(name => entries.push(`🎒 Nhận: ${escapeHtml(name)}`));
+    (changes.items_removed || []).filter(isRealName).forEach(name => entries.push(`🖐️ Sử dụng: ${escapeHtml(name)}`));
 
     if (entries.length > 0) {
       logParts.push(`<div class="turn-changes">${entries.map(e => `<span class="log-entry">${e}</span>`).join('')}</div>`);
     }
+  }
+
+  // 1c. Lên cấp (bug: XP vượt mốc nhưng nhân vật không lên cấp — nay backend
+  // xử lý & báo qua mechanics.level_up)
+  if (mechanics.level_up && mechanics.level_up.new_level) {
+    const lv = mechanics.level_up.new_level;
+    logParts.push(`<div class="turn-levelup">⬆️ <strong>Lên cấp ${lv}!</strong> Máu & mana đã hồi đầy.</div>`);
   }
 
   if (logParts.length > 0) {
@@ -819,6 +913,113 @@ async function askAssistant(){
   }
 }
 
+/* ---------------------------- Dropdown "Chơi lại / Xoá campaign" ---------------------------- */
+
+function togglePanelMenu(force){
+  const dd = byId('panel-menu-dropdown');
+  if (!dd) return;
+  if (force === undefined) dd.classList.toggle('hidden');
+  else dd.classList.toggle('hidden', !force);
+}
+
+function initPanelMenu(){
+  const btn = byId('panel-menu-btn');
+  if (!btn) return;
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    togglePanelMenu();
+  });
+  document.addEventListener('click', (e) => {
+    const menu = byId('panel-menu');
+    if (!menu || menu.contains(e.target)) return;
+    togglePanelMenu(false);
+  });
+}
+
+let replayPollTimer = null;
+
+function openReplayModal(){
+  byId('replay-modal-overlay').classList.remove('hidden');
+  byId('replay-error-text').classList.add('hidden');
+  byId('replay-progress-fill').style.width = '0%';
+  byId('replay-progress-label').textContent = 'Đang chuẩn bị…';
+}
+
+const REPLAY_STAGE_LABEL = {
+  milestone: 'Đang chuẩn bị chặng đầu…',
+  opening: 'Đang mở màn…',
+  ready: 'Đã sẵn sàng!',
+};
+
+async function pollReplayStatus(){
+  if (replayPollTimer){ clearTimeout(replayPollTimer); replayPollTimer = null; }
+  let data;
+  try{
+    const res = await fetch('/setup_status');
+    data = await res.json();
+  } catch(e){
+    console.error('Lỗi khi kiểm tra tiến trình:', e);
+    replayPollTimer = setTimeout(pollReplayStatus, 1500);
+    return;
+  }
+
+  if (data.stage === 'error'){
+    byId('replay-error-text').textContent = '⚠️ ' + (data.error || 'Đã có lỗi khi dựng lại thế giới.');
+    byId('replay-error-text').classList.remove('hidden');
+    return;
+  }
+
+  const p = Math.max(0, Math.min(100, Number(data.percent) || 0));
+  byId('replay-progress-fill').style.width = p + '%';
+  byId('replay-progress-label').textContent = `${REPLAY_STAGE_LABEL[data.stage] || 'Đang xử lý…'} (${p}%)`;
+
+  if (data.stage === 'ready'){
+    window.location.reload();
+    return;
+  }
+  replayPollTimer = setTimeout(pollReplayStatus, 1500);
+}
+
+async function handleReplayCampaign(mode){
+  const label = mode === 'same_character' ? 'chơi lại campaign này' : 'chơi lại campaign với nhân vật mới';
+  if (!confirm(`Bạn chắc chắn muốn ${label}? Tiến trình hiện tại sẽ mất.`)) return;
+  togglePanelMenu(false);
+
+  let data;
+  try{
+    const res = await fetch('/replay_campaign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    });
+    data = await res.json();
+  } catch(e){
+    console.error('Lỗi replay_campaign:', e);
+    alert('Không kết nối được server.');
+    return;
+  }
+
+  if (data.error){ alert(data.error); return; }
+  if (data.redirect){ window.location.href = data.redirect; return; }
+
+  openReplayModal();
+  pollReplayStatus();
+}
+
+async function handleDeleteCampaign(){
+  if (!confirm('Xoá TOÀN BỘ campaign hiện tại (nhân vật, tiến trình, cốt truyện)? Không thể hoàn tác.')) return;
+  togglePanelMenu(false);
+
+  try{
+    const res = await fetch('/delete_campaign', { method: 'POST' });
+    const data = await res.json();
+    window.location.href = data.redirect || '/';
+  } catch(e){
+    console.error('Lỗi delete_campaign:', e);
+    alert('Không kết nối được server.');
+  }
+}
+
 function initAssistant(){
   byId('assistant-toggle').addEventListener('click', (e) => {
     e.stopPropagation();
@@ -846,6 +1047,7 @@ async function init(){
     if (e.key === 'Enter') sendCustomAction();
   });
   initAssistant();
+  initPanelMenu();
 
   if (char){
     startStory();

@@ -5,6 +5,7 @@ agents/assistant.py (ngoài truyện).
 """
 
 import asyncio
+import difflib
 import json
 from concurrent.futures import ThreadPoolExecutor
 
@@ -43,8 +44,55 @@ async def _generate_next_milestone_async(char_id, bible, story_state, act_index,
 # -> câu chuyện lặp lại nhàm chán và chỉ còn biết spam quái làm "sự kiện" lấp
 # đầy turn_note ép buộc bên dưới. Hai ngưỡng này là van an toàn: SOFT chỉ nhắc
 # mạnh hơn, HARD ép backend tự chuyển milestone kể cả model không tự báo.
-MILESTONE_SOFT_STUCK_TURNS = 12
-MILESTONE_HARD_STUCK_TURNS = 22
+# Rút ngắn xuống 10/15 (trước 12/22): milestone càng ngắn thì roster disposable
+# (npcs/encounters/locations do milestone.py sinh) refresh càng thường xuyên ->
+# 8B luôn có "thực đơn" tươi để bám thay vì xài lại pool cũ tới nhàm rồi bịa
+# lung tung. Đồng thời chống tình trạng đứng mãi 1 act (thực tế đã thấy: turn 99
+# vẫn Act 1).
+MILESTONE_SOFT_STUCK_TURNS = 10
+MILESTONE_HARD_STUCK_TURNS = 15
+
+# Van chống "vòng lặp encounter": 1 quái thù địch sống quá nhiều lượt liên tiếp
+# là nguyên nhân #1 khiến DM lặp gần nguyên văn (đã kiểm chứng trên DB thật:
+# 1 con Wraith sống 30+ lượt, story lặp y hệt 6 lượt liền t38-t43). SOFT chỉ
+# nhắc mạnh model tự resolve; nhưng nudge mềm đã được CHỨNG MINH là bị model
+# nhỏ phớt lờ (prompt đã có ANTI-REPETITION + BREAKTHROUGH mà vẫn lặp) -> tới
+# ngưỡng HARD, backend TỰ ép quái rút lui (đổi status='fled'), không phụ thuộc
+# model nữa — giống hệt triết lý MILESTONE_HARD_STUCK ép milestone_complete.
+ENCOUNTER_SOFT_STUCK_TURNS = 2
+ENCOUNTER_HARD_STUCK_TURNS = 5
+
+# Van CỨNG chống lặp story (kiểu loop thứ 2: hội thoại/mô tả lặp gần NGUYÊN VĂN
+# — vd DM trả về y hệt 1 đoạn thoại với NPC 2 lượt liền khi người chơi hỏi lại
+# cùng chủ đề). Nudge mềm (ANTI-REPETITION/BREAKTHROUGH trong prompt) ĐÃ được
+# chứng minh là bị model nhỏ phớt lờ (lặp 100% nguyên văn dù prompt cấm), nên ở
+# đây KHÔNG tin model: sinh xong thì ĐO độ giống với vài lượt gần nhất bằng
+# difflib; nếu vượt ngưỡng -> bắt model viết lại 1 lần, kèm chính đoạn bị lặp và
+# lệnh cứng phải đẩy cốt truyện sang diễn biến MỚI.
+STORY_REPEAT_LOOKBACK = 3
+STORY_REPEAT_SIMILARITY = 0.82
+
+
+def _max_story_similarity(conn, new_story: str):
+    """Trả về (similarity cao nhất, đoạn story cũ giống nhất) giữa new_story và
+    STORY_REPEAT_LOOKBACK lượt assistant gần nhất. difflib ratio ~1.0 nghĩa là
+    gần như nguyên văn."""
+    new_norm = (new_story or "").strip().lower()
+    if not new_norm:
+        return 0.0, None
+    rows = conn.execute(
+        "SELECT content FROM history WHERE role = 'assistant' ORDER BY id DESC LIMIT ?",
+        (STORY_REPEAT_LOOKBACK,),
+    ).fetchall()
+    best, best_text = 0.0, None
+    for r in rows:
+        prev = (r["content"] or "").strip().lower()
+        if not prev:
+            continue
+        ratio = difflib.SequenceMatcher(None, new_norm, prev).ratio()
+        if ratio > best:
+            best, best_text = ratio, r["content"]
+    return best, best_text
 
 # Thưởng XP/gold khi giết quái — code tự tính theo tier (suy từ max_hp), không
 # để model tự quyết (trước đây model lúc cộng xp lúc quên, không nhất quán).
@@ -86,7 +134,8 @@ def _detect_dialogue_deadlock(bible: dict | None) -> str | None:
     đổi tình huống)."""
     if not bible:
         return None
-    npc_names = [n.get("name") for n in (bible.get("npcs") or []) if n.get("name")]
+    nb = campaign._normalize_bible(bible)
+    npc_names = [n.get("name") for n in nb["characters"]["key_npcs"] if n.get("name")]
     if not npc_names:
         return None
 
@@ -116,23 +165,27 @@ def _detect_dialogue_deadlock(bible: dict | None) -> str | None:
 
 def _snapshot_pre_turn(conn, char_id: int, user_input: str):
     """Chụp lại TOÀN BỘ state có thể bị đổi trong 1 lượt /chat (character row,
-    entity, world_loot, mốc history hiện tại) NGAY TRƯỚC KHI xử lý lượt đó —
-    để nút "Thử lại" trên UI khôi phục đúng về đây rồi chạy lại CÙNG
-    user_input, nếu model lỡ sinh lỗi (lộ tên NPC, quái sai roster, lẫn tiếng
-    Trung...). Ghi đè snapshot cũ mỗi lượt -> chỉ thử lại được lượt GẦN NHẤT,
-    không phải toàn bộ lịch sử (đủ dùng cho "lỡ tay" tức thời, không phải undo
-    vô hạn)."""
+    campaign_state row, entity, world_loot, mốc history hiện tại) NGAY TRƯỚC
+    KHI xử lý lượt đó — để nút "Thử lại" trên UI khôi phục đúng về đây rồi
+    chạy lại CÙNG user_input, nếu model lỡ sinh lỗi (lộ tên NPC, quái sai
+    roster, lẫn tiếng Trung...). Ghi đè snapshot cũ mỗi lượt -> chỉ thử lại
+    được lượt GẦN NHẤT, không phải toàn bộ lịch sử (đủ dùng cho "lỡ tay" tức
+    thời, không phải undo vô hạn)."""
     c = conn.cursor()
     char_row = c.execute("SELECT * FROM character WHERE id = ?", (char_id,)).fetchone()
     if not char_row:
         return
     char_dict = dict(char_row)
-    char_dict.pop("pre_turn_snapshot", None)  # đừng lồng snapshot vào chính nó
-    # last_turn_resolution PHẢI sống sót qua restore — đây chính là kết quả
-    # xúc xắc THẬT mà người chơi đã bấm roll cho lượt sắp xử lý; nếu snapshot
-    # nó ở đây rồi restore đè lại, "Thử lại" sẽ mất kết quả roll gốc và không
-    # còn gì để tái dùng (phải roll lại — đúng thứ cần tránh).
-    char_dict.pop("last_turn_resolution", None)
+
+    state_row = c.execute("SELECT * FROM campaign_state WHERE character_id = ?", (char_id,)).fetchone()
+    state_dict = dict(state_row) if state_row else {}
+    # Các field này PHẢI sống sót qua restore (xem db._STATE_SURVIVE_RESTORE):
+    # pending_action/pre_turn_snapshot đừng lồng snapshot vào chính nó;
+    # last_turn_resolution là kết quả xúc xắc THẬT người chơi vừa roll cho
+    # lượt sắp xử lý — nếu snapshot rồi restore đè lại, "Thử lại" sẽ mất kết
+    # quả roll gốc và phải roll lại (đúng thứ cần tránh).
+    for f in db._STATE_SURVIVE_RESTORE:
+        state_dict.pop(f, None)
 
     entity_rows = [dict(r) for r in c.execute(
         "SELECT * FROM entity WHERE character_id = ?", (char_id,)
@@ -145,12 +198,13 @@ def _snapshot_pre_turn(conn, char_id: int, user_input: str):
     snapshot = {
         "user_input": user_input,
         "character": char_dict,
+        "campaign_state": state_dict,
         "entities": entity_rows,
         "world_loot": loot_rows,
         "max_history_id": max_history_id,
     }
     c.execute(
-        "UPDATE character SET pre_turn_snapshot = ? WHERE id = ?",
+        "UPDATE campaign_state SET pre_turn_snapshot = ? WHERE character_id = ?",
         (json.dumps(snapshot, ensure_ascii=False), char_id),
     )
     conn.commit()
@@ -161,7 +215,7 @@ def _restore_pre_turn(conn, char_id: int) -> str | None:
     để gọi lại y hệt lượt vừa rồi. Trả None nếu chưa có lượt /chat nào để thử
     lại (vd vừa /start_game xong, chưa hành động lần nào)."""
     c = conn.cursor()
-    row = c.execute("SELECT pre_turn_snapshot FROM character WHERE id = ?", (char_id,)).fetchone()
+    row = c.execute("SELECT pre_turn_snapshot FROM campaign_state WHERE character_id = ?", (char_id,)).fetchone()
     if not row or not row["pre_turn_snapshot"]:
         return None
     try:
@@ -170,11 +224,18 @@ def _restore_pre_turn(conn, char_id: int) -> str | None:
         return None
 
     char_fields = snap.get("character") or {}
-    cols = [k for k in char_fields.keys() if k not in ("id", "pre_turn_snapshot", "last_turn_resolution")]
+    cols = [k for k in char_fields.keys() if k != "id"]
     if cols:
         set_clause = ", ".join(f"{col} = ?" for col in cols)
         values = [char_fields[col] for col in cols]
         c.execute(f"UPDATE character SET {set_clause} WHERE id = ?", (*values, char_id))
+
+    state_fields = snap.get("campaign_state") or {}
+    cols_state = [k for k in state_fields.keys() if k not in ("character_id", *db._STATE_SURVIVE_RESTORE)]
+    if cols_state:
+        set_clause = ", ".join(f"{col} = ?" for col in cols_state)
+        values = [state_fields[col] for col in cols_state]
+        c.execute(f"UPDATE campaign_state SET {set_clause} WHERE character_id = ?", (*values, char_id))
 
     c.execute("DELETE FROM entity WHERE character_id = ?", (char_id,))
     for e in snap.get("entities") or []:
@@ -207,7 +268,7 @@ def _restore_pre_turn(conn, char_id: int) -> str | None:
 # DM system prompt
 # ---------------------------------------------------------------------------
 
-def build_system_prompt(char) -> str:
+def build_system_prompt(char, state) -> str:
     c = db.character_row_to_dict(char)
 
     attrs_line = ", ".join(f"{k.upper()}: {v}" for k, v in c["attrs"].items())
@@ -260,10 +321,10 @@ def build_system_prompt(char) -> str:
     # -> chỉ mớm đúng milestone đang active, không phải cả campaign, vừa cắt
     # mạnh context mỗi lượt vừa chặn model tự spoil chuyện chưa tới.
     campaign_block = campaign.format_campaign_context(
-        db._load_campaign_bible(char),
-        current_milestone=db.load_current_milestone(char),
-        act_index=char["campaign_act_index"] if "campaign_act_index" in char.keys() else 0,
-        turn_number=char["current_turn"] or 0,
+        db._load_campaign_bible(),
+        current_milestone=db.load_current_milestone(state),
+        act_index=state["campaign_act_index"] if state else 0,
+        turn_number=(state["current_turn"] if state else 0) or 0,
     )
 
     return f"""/no_think
@@ -282,8 +343,6 @@ Skills: {fmt_skills(c['skills'])}
 Items: {fmt_list(c['items'])}
 
 {campaign_block}
-
-{social.format_social_context(c['race_en'], c['character_class_en'])}
 
 ## ACTION VALIDATION (do this FIRST, every turn)
 1. Action uses a weapon/item/skill not in Equipment/Skills/Items above, OR a skill marked
@@ -341,10 +400,12 @@ someone as "một bóng người"/"một người lạ" without naming them yet,
 the same vague way too — never let a choice leak a name the player hasn't been told yet.
 
 ## SCENE CONTINUITY
-[CURRENT SCENE STATE] each turn is the ONLY truth for where the character is — never move
-backward to a resolved location/puzzle/obstacle unless they explicitly retreat; always advance
-scene_state forward. Frame each new scene as a SITUATION (opportunity + danger + mystery +
-rising tension), not a bare quest step — the player should want to act immediately.
+The recent story history + the CURRENT MILESTONE's location/sub-locations are the truth for
+where the character is — keep them WITHIN the milestone's listed places, moving between those
+connected sub-locations rather than inventing brand-new rooms. Never move backward to a
+resolved location/puzzle/obstacle unless the player explicitly retreats; always advance the
+scene forward. Frame each new scene as a SITUATION (opportunity + danger + mystery + rising
+tension), not a bare quest step — the player should want to act immediately.
 
 NEVER REPEAT PROSE VERBATIM: if the player's action this turn closely mirrors/repeats one from
 recent turns (e.g. asking the same question again, in different words), do NOT reproduce the
@@ -371,12 +432,17 @@ carry the scene instead of stacking adjective clauses.
 ## ENTITIES (NPCs/monsters) — PERSISTENCE RULES
 mechanics.entities is OPTIONAL — only when (a) a new NPC/monster appears, or (b) an EXISTING
 one (in ACTIVE ENTITIES) takes damage/heals/dies/flees.
-NEW: key (snake_case unique), name (English), type ("npc"|"monster"), max_hp, hp(=max_hp),
+NEW: key (snake_case, MUST be plain ASCII English — a-z/0-9/underscore ONLY, never Vietnamese
+or accented characters; "bong_nguoi_an" not "bóng_người_ẩn"), name (MUST be English — the
+backend REJECTS any entity whose name has non-English letters, so a Vietnamese name means the
+creature simply won't exist), type ("npc"|"monster"), max_hp, hp(=max_hp),
 ac (8-20: weak=8-11, average=12-14, armored=15-18, legendary=19-20), attack_bonus (0-10:
 weak=0-2, average=3-5, strong=6-8, boss=9-10), damage_dice (5e notation, e.g. "1d6"/"2d8+2"),
 hostile (bool). These are set ONCE and drive all later attack rolls to/from it — match how the
 story describes it (a lightly-clad goblin ≠ AC 18). You never compute hit/damage yourself —
 backend rolls it, you only narrate the result.
+PREFER a name from the MILESTONE ROSTER / CAMPAIGN BIBLE (see context above) — only invent a
+brand-new creature/person when none of them fit the scene, and even then its name stays English.
 gender ("male"|"female"): REQUIRED whenever the entity is a PERSON (human/humanoid) — even if
 type="monster" because they're hostile (e.g. a cultist, a rival, a bandit are still people).
 Skip only for genuinely non-human/genderless creatures (beasts, constructs, aberrations, undead
@@ -389,6 +455,16 @@ same species, same attack method (a snake bite ≠ "spider" in entities). Never 
 EXISTING (key already in ACTIVE ENTITIES): send ONLY key + hp_change (negative=damage,
 positive=heal) + "status":"dead"/"fled" if applicable — never resend max_hp/type/name, never
 switch its species mid-scene, never invent stats for it.
+
+ENTITY DEATH RULE (same discipline as player HP — never narrate ahead of the dice): an entity is
+ONLY dead/destroyed/vanished/defeated if THIS turn's damage (see DAMAGE fact in INTERNAL
+MECHANICS, or ACTIVE ENTITIES' current HP minus that damage) truly brings its HP to 0 — you do
+not decide this narratively, the backend's rolled damage decides it. If the hit connects but HP
+stays above 0, narrate it as wounded/staggered/reeling/enraged — STILL PRESENT, not gone — and
+set "status":"dead" ONLY when the arithmetic actually reaches 0 (omit "status" otherwise, just
+send hp_change). Never write story text implying the fight is over, the threat is gone, or
+"nothing remains of it" while its HP is still above 0 — that breaks continuity with ACTIVE
+ENTITIES and forces you into repeating yourself next turn with nothing new left to narrate.
 Monster names must be English, never Vietnamese.
 Do NOT write "description" or "visual_prompt" for entities — a separate system resolves the
 player-facing description and the image prompt from your story text + the campaign roster after
@@ -407,6 +483,19 @@ distinct place (never repeat while staying put, never trigger from a passing men
 name (English, short) — do NOT write description or visual_prompt, same reason as ENTITIES
 above: a separate system resolves those from your story text afterward.
 
+## INTERACTIVE OBJECTS (environment, not just combat)
+The world is more than NPCs and monsters. Actively work in physical things the player can
+INTERACT with — a barred door needing strength, a locked chest, a lever or mechanism, an altar,
+a sealed vault, a corpse to search, a collapsed passage. Draw them from the MILESTONE ROSTER's
+interactive objects when listed, or invent a fitting one. These are NOT entities (no hp/combat)
+— when the player acts on one, it's resolved as a normal skill check (the classifier assigns
+the stat + DC), you just narrate the outcome. Present them as a SITUATION (a way forward that
+demands effort/cleverness), so combat isn't the only kind of challenge.
+mechanics.object: null on most turns; set it (English name, short) ONLY the turn a notable
+interactive object becomes the focus of the scene (the player is now facing/using it) — do NOT
+write description or visual_prompt (resolved separately, like LOCATION/ENTITIES). Skip for
+trivial background props; only for objects that actually matter this turn.
+
 ## LANGUAGE
 100% Vietnamese output, no exceptions, even in unclear/conflicting cases — just decide silently
 and continue in Vietnamese. NEVER mix in Chinese, English, or any other language/script — not
@@ -419,19 +508,23 @@ Do NOT output "success"/"roll_type" — backend already decided those; writing t
   "story": "...",
   "mechanics": {{
     "reasoning": "",
-    "event_occurred": false,
     "character_died": false,
     "milestone_complete": false,
     "milestone_outcome_summary": "",
     "act_complete": false,
     "changes": {{"hp": 0, "mana": 0, "gold": 0, "xp": 0, "items_added": [], "items_removed": []}},
     "entities": [
-      {{"key": "<unique_entity_key>", "name": "<entity_name>", "type": "monster|npc|companion|object",
+      {{
+        "key": "<ascii_snake_case_key>", "name": "<English entity name>", "type": "monster|npc",
         "gender": "male|female (omit/null if not a person)", "max_hp": 0, "hp": 0, "ac": 12,
-        "hostile": false, "status": "alive|dead"}}
+        "hostile": false, "status": "alive|dead"
+        }}
     ],
-    "loot_dropped": [{{"name": "<item_name>", "source_key": "<entity_key>"}}],
-    "location": null
+    "loot_dropped": [
+        {{"name": "<item_name>", "source_key": "<entity_key>"}}
+    ],
+    "location": null,
+    "object": null
   }},
   "choices": [
     {{"text": "...", "needs_roll": true, "roll": "advantage", "dc": 12, "reason": {{"type": "attribute", "name": "WIS"}}}}
@@ -485,6 +578,108 @@ an English monster/location name), fix it immediately, don't let it slip through
 
 
 # ---------------------------------------------------------------------------
+# Structured output — ép decoder tuân theo đúng shape ở OUTPUT FORMAT phía
+# trên (không chỉ "JSON hợp lệ" như format="json" cũ). format="json" chỉ ràng
+# buộc cú pháp, KHÔNG ràng buộc field/kiểu dữ liệu -> model nhỏ (vd qwen3:8b)
+# hay lẫn cấu trúc sai hoặc nhét nguyên đoạn JSON vào "story". Truyền hẳn JSON
+# Schema vào format= (ollama-python >= 0.4 hỗ trợ) để grammar-constrain từng
+# token theo đúng field/type/enum -> giảm mạnh lỗi vỡ JSON ở model nhỏ, không
+# cần đổi model. Field không "required" model vẫn được phép bỏ qua (đúng tinh
+# thần "existing entity chỉ gửi key+hp_change" trong OUTPUT FORMAT).
+_ENTITY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "key": {"type": "string"},
+        "name": {"type": "string"},
+        "type": {"type": "string", "enum": ["monster", "npc"]},
+        "gender": {"type": ["string", "null"]},
+        "max_hp": {"type": "integer"},
+        "hp": {"type": "integer"},
+        "hp_change": {"type": "integer"},
+        "ac": {"type": "integer"},
+        "hostile": {"type": "boolean"},
+        "status": {"type": "string", "enum": ["alive", "dead", "fled"]},
+    },
+    "required": ["key"],
+    "additionalProperties": False,
+}
+
+_REASON_SCHEMA = {
+    "type": ["object", "null"],
+    "properties": {
+        "type": {
+            "type": "string",
+            "enum": ["attribute", "strength", "weakness", "skill", "item", "race", "class"],
+        },
+        "name": {"type": "string"},
+    },
+    "required": ["type", "name"],
+    "additionalProperties": False,
+}
+
+_CHOICE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "text": {"type": "string"},
+        "needs_roll": {"type": "boolean"},
+        "roll": {"type": "string", "enum": ["advantage", "disadvantage", "normal"]},
+        "dc": {"type": ["integer", "null"]},
+        "reason": _REASON_SCHEMA,
+    },
+    "required": ["text", "needs_roll", "roll", "dc", "reason"],
+    "additionalProperties": False,
+}
+
+DM_TURN_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "story": {"type": "string"},
+        "mechanics": {
+            "type": "object",
+            "properties": {
+                "reasoning": {"type": "string"},
+                "character_died": {"type": "boolean"},
+                "milestone_complete": {"type": "boolean"},
+                "milestone_outcome_summary": {"type": "string"},
+                "act_complete": {"type": "boolean"},
+                "changes": {
+                    "type": "object",
+                    "properties": {
+                        "hp": {"type": "integer"},
+                        "mana": {"type": "integer"},
+                        "gold": {"type": "integer"},
+                        "xp": {"type": "integer"},
+                        "items_added": {"type": "array", "items": {"type": "string"}},
+                        "items_removed": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "additionalProperties": False,
+                },
+                "entities": {"type": "array", "items": _ENTITY_SCHEMA},
+                "loot_dropped": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "source_key": {"type": ["string", "null"]},
+                        },
+                        "required": ["name"],
+                        "additionalProperties": False,
+                    },
+                },
+                "location": {"type": ["string", "null"]},
+                "object": {"type": ["string", "null"]},
+            },
+            "additionalProperties": False,
+        },
+        "choices": {"type": "array", "items": _CHOICE_SCHEMA},
+    },
+    "required": ["story", "mechanics", "choices"],
+    "additionalProperties": False,
+}
+
+
+# ---------------------------------------------------------------------------
 # Chat / gameplay
 # ---------------------------------------------------------------------------
 
@@ -529,7 +724,17 @@ def _localize_choices(choices, char_dict):
             continue  # phòng model trả sai schema (vd list string thay vì object)
         reason = ch.get("reason")
         if reason and reason.get("name"):
-            reason["name"] = _localize_reason_name(reason.get("type"), reason.get("name"), char_dict)
+            # Model hay BỊA giá trị reason.name dù reason.type đã bị enum ràng
+            # buộc (vd CLASS: "Chính thống" — một class không hề có trên sheet
+            # "Thánh Kỵ Sĩ"). Không tin 100%: whitelist reason.name theo đúng
+            # sheet thật; không khớp -> gỡ bỏ nhãn (về normal) thay vì hiển thị
+            # một nhãn thuộc tính/class/skill bịa cho người chơi.
+            if classification._reason_is_valid(reason, char_dict):
+                reason["name"] = _localize_reason_name(reason.get("type"), reason.get("name"), char_dict)
+            else:
+                print(f"[DEBUG] choice reason không khớp sheet: {reason} -> gỡ nhãn, ép roll=normal")
+                ch["reason"] = None
+                ch["roll"] = "normal"
     return choices
 
 
@@ -550,72 +755,116 @@ async def handle_chat_classify(data: dict) -> dict:
     _snapshot_pre_turn(conn_snap, char["id"], user_input)
     conn_snap.close()
 
+    state = db.get_campaign_state(char["id"])
     char_dict = db.character_row_to_dict(char)
     suspicious = _mentions_missing_item(user_input, char_dict)
-    current_turn_before = char["current_turn"] or 0
+    current_turn_before = (state["current_turn"] if state else 0) or 0
 
     conn_pre = db.get_conn()
     active_entities = [dict(row) for row in entities.get_active_entities(conn_pre, char["id"])]
     conn_pre.close()
 
-    turns_since_event = char["turns_since_event"] or 0
-    # Ngưỡng nâng từ 2 lên 3 — turns_since_event giờ ĐƯỢC cập nhật thật (xem
-    # cuối hàm, dựa vào mechanics.event_occurred model trả về), trước đây cột
-    # này không bao giờ được ghi nên force_event luôn = False (chết, vô tác
-    # dụng). Nới ngưỡng lên 1 chút để có chỗ thở, tránh dồn dập ép "sự kiện
-    # lớn" mỗi 2 lượt chồng lên guard chống spam quái bên dưới.
-    force_event = turns_since_event >= 3
-
-    turn_note = f"[STATE] turns_since_major_event={turns_since_event}."
-    if force_event:
-        turn_note += (
-            " A major event (combat, ambush, hostile NPC, trap triggering, or critical "
-            "discovery) MUST occur THIS turn. Do NOT offer another search/examine/investigate "
-            "choice as a safe option — every choice this turn must carry real risk or "
-            "immediately escalate the danger."
-        )
+    turn_note = ""
+    force_flee_key = None  # set khi van HARD ép quái kẹt rút lui (đọc lại ở narrate)
     if suspicious:
-        turn_note += (" WARNING: the player's action may reference an item/skill/weapon "
+        turn_note += ("WARNING: the player's action may reference an item/skill/weapon "
                     "not present on the character sheet. Verify against Equipment/Items/Skills "
                     "before resolving. If not owned, success MUST be false and the character "
-                    "must suffer a penalty for hesitating (e.g. HP loss from being struck).")
+                    "must suffer a penalty for hesitating (e.g. HP loss from being struck). ")
 
-    # --- Guard chống spam quái: 1 quái thù địch MỚI vừa xuất hiện trong lượt
-    # này/lượt trước -> cấm sinh thêm quái mới, bắt buộc phải khai triển/giải
-    # quyết con vừa xuất hiện trước. Trước đây không có guard này -> có lúc 3
-    # quái MỚI xuất hiện liên tiếp trong 3-4 lượt (vd Erased One turn 30/32/33,
-    # Memory Wraith turn 44/45/46 trong 1 lần chơi thật) mà không con nào được
-    # giải quyết xong, gây cảm giác "đi xíu là gặp quái liên tục".
-    recent_hostile_spawns = [
-        e for e in active_entities
-        if e.get("entity_type") == "monster" and e.get("hostile")
-        and db.safe_int(e.get("first_seen_turn"), -99) >= current_turn_before - 1
-    ]
-    if recent_hostile_spawns:
-        recent_names = ", ".join(e["name"] for e in recent_hostile_spawns)
+    campaign_bible = db._load_campaign_bible()
+    current_milestone = db.load_current_milestone(state)
+
+    # --- Guard nhịp độ entity: CHỈ 1 NPC/quái thù địch được sống cùng lúc —
+    # phải giải quyết xong (chết/bỏ chạy/người chơi né được) mới cho phép 1
+    # cái MỚI xuất hiện. Khi được phép spawn mới, luân phiên NPC/quái (dựa
+    # theo loại entity gần nhất) thay vì luôn thiên về quái, và tránh lặp lại
+    # đúng tên vừa gặp. Thay hẳn cơ chế force_event cũ (ép "sự kiện lớn" mỗi 3
+    # lượt bất kể milestone) — milestone (objective/success_condition/
+    # possible_encounters/npcs) đã đủ để dẫn dắt NỘI DUNG episode tiếp theo,
+    # guard này chỉ còn lo NHỊP ĐỘ/LOẠI, không phải nguồn ép sự kiện nữa. Cơ
+    # chế cũ + việc model hay quên resolve quái cũ trước khi bịa quái mới
+    # chính là nguyên nhân gây "spawn dồn" (nhiều quái mới liên tiếp không con
+    # nào được giải quyết xong) trong các phiên chơi thật trước đây.
+    active_hostile = [e for e in active_entities if e.get("hostile")]
+    if active_hostile:
+        hostile_names = ", ".join(e["name"] for e in active_hostile)
         turn_note += (
-            f" PACING GUARD: {recent_names} vừa xuất hiện rất gần đây — KHÔNG được sinh thêm "
-            f"quái thù địch MỚI nào trong lượt này. Hãy khai triển/giải quyết mối đe doạ hiện "
-            f"có (giao chiến, để nó bỏ chạy, dùng đối thoại/môi trường) thay vì chồng thêm quái "
-            f"mới, trừ khi hành động của người chơi chủ động tìm kiếm nguy hiểm mới."
+            f"PACING GUARD: {hostile_names} đang là mối đe doạ hiện có — TUYỆT ĐỐI KHÔNG "
+            f"được sinh thêm NPC/quái thù địch MỚI nào trong lượt này. Phải giải quyết mối đe "
+            f"doạ hiện tại trước (giao chiến tới khi nó chết/bỏ chạy, hoặc để người chơi né/"
+            f"trốn thoát thành công) — chỉ lượt SAU KHI đã giải quyết xong mới được để 1 mối "
+            f"đe doạ MỚI xuất hiện. "
         )
 
-    # Nhắc lại roster quái của campaign NGAY SÁT cuối context (gần chỗ model
-    # sắp sinh ra entity mới nhất) — rule đầy đủ đã có trong system prompt
-    # (## CAMPAIGN) nhưng nằm quá xa so với lúc model thực sự quyết định
-    # entity mới, dễ bị lãng quên giữa 1 system prompt rất dài. Lặp lại ngắn
-    # gọn ở đây (recency) để model khó bỏ qua hơn.
-    campaign_bible = db._load_campaign_bible(char)
-    current_milestone = db.load_current_milestone(char)
-    if campaign_bible:
-        roster_names = ", ".join(campaign.monster_roster_names(campaign_bible, current_milestone))
-        if roster_names and not recent_hostile_spawns:
+        # --- Van chống "vòng lặp escape": encounter thù địch kéo dài quá nhiều
+        # lượt mà chưa resolve là nguyên nhân #1 khiến người chơi cảm thấy "bị
+        # dắt đi vòng vòng" — DM lặp gần nguyên văn cùng 1 đoạn narrate 3-4 lượt
+        # liền. first_seen_turn của quái GIÀ NHẤT cho biết encounter đã kéo dài
+        # bao nhiêu lượt. SOFT (>=2): nhắc mạnh model tự resolve. HARD (>=5):
+        # backend TỰ cho quái rút lui (không tin model nữa) — xem force_flee_key.
+        oldest_hostile = min(
+            active_hostile,
+            key=lambda e: db.safe_int(e.get("first_seen_turn"), current_turn_before),
+        )
+        turns_in_encounter = current_turn_before - db.safe_int(
+            oldest_hostile.get("first_seen_turn"), current_turn_before
+        )
+        if turns_in_encounter >= ENCOUNTER_HARD_STUCK_TURNS:
+            force_flee_key = (oldest_hostile.get("key") or "").strip().lower()
+            flee_name = oldest_hostile.get("name") or "kẻ thù"
+            print(f"[DEBUG] encounter kẹt {turns_in_encounter} lượt -> ép '{flee_name}' rút lui (force_flee_key={force_flee_key})")
             turn_note += (
-                f" REMINDER: if a NEW hostile monster must appear THIS turn, prefer one of the "
-                f"suggested/recurring names already established: {roster_names} — reuse its exact "
-                f"name/species/appearance/moveset/behavior from the CAMPAIGN section above when it "
-                f"fits. Only invent something else if none of these fit the scene."
+                f" FORCED RESOLUTION: this standoff with {flee_name} has dragged on {turns_in_encounter} "
+                f"turns and is stuck in a loop — it ENDS NOW. THIS turn, {flee_name} BREAKS OFF the "
+                f"fight and leaves for good: it recoils, retreats/flees into the dark, is dragged off, "
+                f"collapses, or is otherwise decisively removed from the scene — the backend is marking "
+                f"it gone regardless, so narrate its exit as final and DO NOT keep it present. Then pivot "
+                f"the scene forward to what the player faces NEXT (a new path, a discovery, the aftermath). "
+                f"Write NOTHING that echoes earlier turns' imagery or lines — this is a clean break. "
             )
+        elif turns_in_encounter >= ENCOUNTER_SOFT_STUCK_TURNS:
+            turn_note += (
+                f" STALLED ENCOUNTER: the player has now spent {turns_in_encounter}+ consecutive "
+                f"turns in this SAME unresolved standoff with {hostile_names} (attacking, fleeing, "
+                f"stalling, or obeying — it hasn't ended). THIS turn it MUST meaningfully move "
+                f"forward or resolve — pick ONE and commit: the threat lands a real, costly blow; "
+                f"it is defeated/driven off for good; the player breaks free to a genuinely NEW "
+                f"location/situation; or a decisive new element crashes in and changes everything. "
+                f"Do NOT reproduce any earlier turn's imagery, sensory beats, or NPC line even "
+                f"loosely — if the player keeps trying the same escape, show it FAILING or "
+                f"SUCCEEDING with concrete consequences, never a fourth identical near-miss. This "
+                f"is the LAST turn this standoff may remain unresolved. "
+            )
+    elif campaign_bible:
+        monster_names = campaign.monster_roster_names(campaign_bible, current_milestone)
+        npc_names = campaign.npc_roster_names(campaign_bible, current_milestone)
+        if monster_names or npc_names:
+            conn_last = db.get_conn()
+            last_entity_row = conn_last.execute(
+                "SELECT name, entity_type FROM entity WHERE character_id = ? "
+                "ORDER BY first_seen_turn DESC, id DESC LIMIT 1",
+                (char["id"],),
+            ).fetchone()
+            conn_last.close()
+            # Luân phiên loại (gợi ý, không ép cứng — không phải hành động nào
+            # của người chơi cũng hợp lý để gặp NPC/quái): entity gần nhất là
+            # quái -> lượt này nghiêng về NPC, và ngược lại.
+            prefer_npc = bool(last_entity_row) and last_entity_row["entity_type"] == "monster"
+            avoid_name = last_entity_row["name"] if last_entity_row else None
+
+            turn_note += (
+                f"REMINDER: if a NEW hostile NPC/monster must appear THIS turn, "
+                f"{'prefer a hostile NPC' if prefer_npc else 'prefer a monster'} this time — "
+                f"alternate type rather than repeating the same type as the most recent "
+                f"encounter. Reuse exact name/appearance/moveset/behavior from these rosters "
+                f"when one fits (invent only if none fit): monsters: {', '.join(monster_names) or 'None'} | "
+                f"NPCs: {', '.join(npc_names) or 'None'}. Any new entity's name AND key must be plain "
+                f"English/ASCII (e.g. key \"shadow_stalker\", never a Vietnamese/accented name — the "
+                f"backend rejects non-English entity names outright)."
+            )
+            if avoid_name:
+                turn_note += f" Avoid reusing \"{avoid_name}\" (the most recent encounter) unless the story specifically calls for meeting them again. "
 
     # --- Van an toàn milestone bị kẹt: model 14B hay quên tự báo
     # mechanics.milestone_complete dù nội dung đã thoả điều kiện -> campaign
@@ -627,8 +876,8 @@ async def handle_chat_classify(data: dict) -> dict:
     # trước (milestone giờ sinh động, không có mảng để nhảy tới).
     force_milestone_complete = False
     if current_milestone:
-        milestone_advanced_turn = char["milestone_advanced_turn"] if "milestone_advanced_turn" in char.keys() else 0
-        turns_stuck = current_turn_before - (milestone_advanced_turn or 0)
+        milestone_advanced_turn = (state["milestone_advanced_turn"] if state else 0) or 0
+        turns_stuck = current_turn_before - milestone_advanced_turn
 
         if turns_stuck >= MILESTONE_HARD_STUCK_TURNS:
             force_milestone_complete = True
@@ -685,7 +934,7 @@ async def handle_chat_classify(data: dict) -> dict:
         )
 
     # --- Call 1: classify (module classification.py) ---
-    prev_result_raw = char["last_result"] if "last_result" in char.keys() else None
+    prev_result_raw = state["last_result"] if state else None
     known_choices = None
     if prev_result_raw:
         try:
@@ -713,14 +962,9 @@ async def handle_chat_classify(data: dict) -> dict:
         "turn_note": turn_note,
         "class_result": class_result,
         "force_milestone_complete": force_milestone_complete,
+        "force_flee_key": force_flee_key,
     }
-    conn_pending = db.get_conn()
-    conn_pending.execute(
-        "UPDATE character SET pending_action = ? WHERE id = ?",
-        (json.dumps(pending, ensure_ascii=False), char["id"]),
-    )
-    conn_pending.commit()
-    conn_pending.close()
+    db.update_campaign_state(char["id"], pending_action=json.dumps(pending, ensure_ascii=False))
 
     adv_reason = class_result.get("advantage_reason")
     display_reason = None
@@ -746,7 +990,9 @@ def _load_pending(expected_stage: str):
     sai thứ tự, hoặc pending đã bị đè bởi 1 hành động mới hơn)."""
     conn_p = db.get_conn()
     row = conn_p.execute(
-        "SELECT pending_action FROM character ORDER BY id DESC LIMIT 1"
+        "SELECT cs.pending_action FROM campaign_state cs "
+        "JOIN character c ON c.id = cs.character_id "
+        "ORDER BY c.id DESC LIMIT 1"
     ).fetchone()
     conn_p.close()
     if not row or not row["pending_action"]:
@@ -804,13 +1050,7 @@ async def handle_chat_roll() -> dict:
     pending["stage"] = "resolved"
     pending["resolution"] = resolution
     pending_json = json.dumps(pending, ensure_ascii=False)
-    conn_r = db.get_conn()
-    conn_r.execute(
-        "UPDATE character SET pending_action = ?, last_turn_resolution = ? WHERE id = ?",
-        (pending_json, pending_json, char_id),
-    )
-    conn_r.commit()
-    conn_r.close()
+    db.update_campaign_state(char_id, pending_action=pending_json, last_turn_resolution=pending_json)
 
     return {
         "success": resolution["success"],
@@ -830,13 +1070,7 @@ async def handle_chat_narrate() -> dict:
     if err:
         return err
 
-    conn_clear = db.get_conn()
-    conn_clear.execute(
-        "UPDATE character SET pending_action = NULL WHERE id = ?",
-        (pending["char_id"],),
-    )
-    conn_clear.commit()
-    conn_clear.close()
+    db.update_campaign_state(pending["char_id"], pending_action=None)
 
     user_input = pending["user_input"]
     char_dict = pending["char_dict"]
@@ -851,8 +1085,9 @@ async def handle_chat_narrate() -> dict:
 
     # Nạp sẵn ở đây (dùng chung cho cả context_writer.resolve_visual bên dưới
     # lẫn khối milestone_complete cuối hàm) — tránh đọc file/DB 2 lần.
-    campaign_bible = db._load_campaign_bible(char)
-    current_milestone = db.load_current_milestone(char)
+    state = db.get_campaign_state(char["id"])
+    campaign_bible = db._load_campaign_bible()
+    current_milestone = db.load_current_milestone(state)
 
     success = resolution["success"]
     roll_type = resolution["roll_type"]
@@ -971,14 +1206,15 @@ async def handle_chat_narrate() -> dict:
     elif contest_type == "attack":
         dice_fact += " This attack MISSED — deal 0 damage to the target entity and mechanics.changes.hp must be 0."
 
-    system_prompt = build_system_prompt(char)  # bản gọn ở tin nhắn trước
+    system_prompt = build_system_prompt(char, state)  # bản gọn ở tin nhắn trước
 
     conn = db.get_conn()
     c = conn.cursor()
 
     # turn_number: tăng dần từ current_turn đã lưu, dùng để đánh dấu
     # last_seen_turn cho entity và để summarizer biết turn nào chưa gộp.
-    turn_number = (char["current_turn"] or 0) + 1
+    state_current_turn = (state["current_turn"] if state else 0) or 0
+    turn_number = state_current_turn + 1
 
     entities_context = entities.format_entities_context(conn, char["id"])
 
@@ -986,30 +1222,27 @@ async def handle_chat_narrate() -> dict:
     # build/gọi lore.format_lore_context() hay world_state.roll_weather() nữa,
     # để model đỡ phải đọc thêm lore mỗi turn (giảm tải context/tốc độ). Bật
     # lại bằng cách khôi phục khối code cũ (xem git history) khi cần.
-    region = char_dict.get("region")
     lore_context = None
     world_state_context = None
 
-    summarized_up_to_turn = char["summarized_up_to_turn"] or 0
-    history_summary = char["history_summary"] or ""
+    summarized_up_to_turn = (state["summarized_up_to_turn"] if state else 0) or 0
+    history_summary = (state["history_summary"] if state else "") or ""
 
     # Nếu số turn CHƯA gộp (tính tới trước turn hiện tại) đã vượt ngưỡng ->
     # tóm tắt lại, đẩy summarized_up_to_turn lên. Làm TRƯỚC khi build context
     # cho turn hiện tại để cửa sổ verbatim luôn nhỏ gọn.
-    if summarizer.needs_summarization(char["current_turn"] or 0, summarized_up_to_turn):
+    if summarizer.needs_summarization(state_current_turn, summarized_up_to_turn):
         rows_to_fold = c.execute(
             "SELECT role, content FROM history WHERE turn_number > ? AND turn_number <= ? ORDER BY id ASC",
-            (summarized_up_to_turn, char["current_turn"] or 0),
+            (summarized_up_to_turn, state_current_turn),
         ).fetchall()
         if rows_to_fold:
             events_text = summarizer.format_events_for_summarization(rows_to_fold)
             history_summary = summarizer.update_summary(history_summary, events_text)
-            summarized_up_to_turn = char["current_turn"] or 0
-            c.execute(
-                "UPDATE character SET history_summary = ?, summarized_up_to_turn = ? WHERE id = ?",
-                (history_summary, summarized_up_to_turn, char["id"]),
+            summarized_up_to_turn = state_current_turn
+            db.update_campaign_state(
+                char["id"], history_summary=history_summary, summarized_up_to_turn=summarized_up_to_turn,
             )
-            conn.commit()
 
     # Chỉ lấy các turn CHƯA gộp vào summary, nguyên văn (thường rất ít dòng
     # vì vừa tóm tắt xong ở trên nếu cần)
@@ -1058,11 +1291,46 @@ async def handle_chat_narrate() -> dict:
     response = ollama.chat(
         model=MODEL,
         messages=messages,
-        format="json",
+        format=DM_TURN_JSON_SCHEMA,
         options=OPTIONS,
         think=False
     )
     result = _parse_dm_json(response["message"]["content"])
+
+    # --- Van CỨNG chống lặp story: đo độ giống với vài lượt gần nhất. Nếu model
+    # vừa sinh ra đoạn gần như nguyên văn 1 lượt trước (kiểu loop hội thoại NPC
+    # mà nudge mềm không chặn được), bắt viết lại ĐÚNG 1 lần với chỉ thị cứng
+    # kèm chính đoạn bị lặp. Chỉ regenerate 1 lần để chặn latency/loop vô hạn —
+    # nếu lần 2 vẫn giống thì đành chấp nhận (hiếm), nhưng thực tế việc chỉ mặt
+    # đoạn trùng + ép diễn biến mới phá được đa số vòng lặp. ---
+    conn_dup = db.get_conn()
+    sim, dup_text = _max_story_similarity(conn_dup, result.get("story", ""))
+    conn_dup.close()
+    if sim >= STORY_REPEAT_SIMILARITY and dup_text:
+        print(f"[DEBUG] story lặp gần nguyên văn (similarity={sim:.2f}) -> ép model viết lại 1 lần")
+        messages.append({"role": "assistant", "content": response["message"]["content"]})
+        messages.append({
+            "role": "user",
+            "content": (
+                f"STOP — REJECTED. The draft you just wrote is {int(sim * 100)}% identical to a "
+                f"story you ALREADY wrote one or two turns ago:\n«{(dup_text or '')[:600]}»\n"
+                f"Repeating it is forbidden. Rewrite THIS turn completely differently: the scene "
+                f"MUST advance with a concrete NEW development the player has not seen yet — reveal "
+                f"a specific new fact, move physically to a new spot, trigger a new event/"
+                f"interruption, or force a decision. If the player keeps asking the same thing, the "
+                f"NPC gives a genuinely NEW concrete detail this time OR bluntly ends the topic and "
+                f"the situation changes. Do NOT reuse the same imagery, the same NPC line, or the "
+                f"same non-answer. Keep the exact same JSON output format."
+            ),
+        })
+        response = ollama.chat(
+            model=MODEL,
+            messages=messages,
+            format=DM_TURN_JSON_SCHEMA,
+            options=OPTIONS,
+            think=False,
+        )
+        result = _parse_dm_json(response["message"]["content"])
 
     # Ép cứng lại success/roll_type theo xúc xắc thật, phòng model vẫn cãi
     result.setdefault("mechanics", {})
@@ -1124,8 +1392,17 @@ async def handle_chat_narrate() -> dict:
         # ledger loot mới nhất để validate ---
         conn2 = db.get_conn()
         pre_turn_alive_keys = {(e.get("key") or "").strip().lower() for e in active_entities}
+        # Roster hợp lệ (bible + milestone hiện tại) để backstop: chặn tên
+        # non-ASCII cứng, log tên ngoài roster (mềm) — xem apply_entity_changes.
+        roster_names = [
+            n.strip().lower()
+            for n in (campaign.monster_roster_names(campaign_bible, current_milestone)
+                      + campaign.npc_roster_names(campaign_bible, current_milestone))
+            if n and n.strip()
+        ]
         new_entities = entities.apply_entity_changes(
-            conn2, char["id"], result["mechanics"].get("entities"), turn_number
+            conn2, char["id"], result["mechanics"].get("entities"), turn_number,
+            roster_names=roster_names or None,
         )
         entities.register_loot_drops(
             conn2, char["id"], result["mechanics"].get("loot_dropped"), turn_number
@@ -1149,6 +1426,22 @@ async def handle_chat_narrate() -> dict:
                 changes["xp"] = db.safe_int(changes.get("xp", 0)) + total_xp
                 changes["gold"] = db.safe_int(changes.get("gold", 0)) + total_gold
                 print(f"[DEBUG] {len(newly_dead)} quái chết lượt này -> +{total_xp} xp, +{total_gold} gold (code roll)")
+
+        # --- Van HARD chống vòng lặp encounter: nếu classify đã đánh dấu quái
+        # kẹt quá lâu (force_flee_key), backend TỰ cho nó rời cảnh — CHỈ khi nó
+        # vẫn còn 'alive' (nếu model đã kịp giết nó lượt này thì để yên, đã
+        # resolve). Không thưởng XP cho việc rút lui (khác giết). Đây là lớp
+        # đảm bảo CỨNG: dù model có phớt lờ chỉ thị FORCED RESOLUTION và cố kể
+        # tiếp encounter, lượt sau nó cũng không còn trong ACTIVE ENTITIES nữa.
+        force_flee_key = (pending.get("force_flee_key") or "").strip().lower()
+        if force_flee_key:
+            conn2.execute(
+                "UPDATE entity SET status = 'fled' WHERE character_id = ? AND key = ? AND status = 'alive'",
+                (char["id"], force_flee_key),
+            )
+            conn2.commit()
+            print(f"[DEBUG] force_flee: đặt entity key='{force_flee_key}' -> fled (nếu còn sống)")
+
         items_added = changes.get("items_added") or []
         validated_items, unverified = entities.validate_items_added(conn2, char["id"], items_added)
         changes["items_added"] = validated_items
@@ -1156,7 +1449,9 @@ async def handle_chat_narrate() -> dict:
             print(f"[DEBUG] items_added không khớp loot ledger (vẫn cho qua): {unverified}")
         conn2.close()
 
-        apply_changes_to_db(char["id"], result["mechanics"]["changes"])
+        level_up_info = apply_changes_to_db(char["id"], result["mechanics"]["changes"])
+        if level_up_info:
+            result["mechanics"]["level_up"] = level_up_info
 
         if mana_cost is not None and mana_cost > 0:
             print(f"mana_cost: {mana_cost}")
@@ -1205,33 +1500,28 @@ async def handle_chat_narrate() -> dict:
             outcome_summary = "The milestone stalled without a clear resolution and the story was forced to move on."
         act_complete_flag = False  # backend ép complete -> không tự bịa act cũng xong theo
 
-    milestone_advanced_this_turn = False
     if milestone_complete and not result["mechanics"].get("character_died"):
         bible_for_progress = campaign_bible
         current_ms = current_milestone
         if bible_for_progress and current_ms:
             nb = campaign._normalize_bible(bible_for_progress)
             total_acts = len(nb["acts"])
-            current_act_idx = char["campaign_act_index"] if "campaign_act_index" in char.keys() else 0
+            current_act_idx = (state["campaign_act_index"] if state else 0) or 0
             is_campaign_finale = current_act_idx >= total_acts - 1
             campaign_finished = bool(act_complete_flag and is_campaign_finale)
             new_act_idx = min(current_act_idx + 1, total_acts - 1) if (act_complete_flag and not is_campaign_finale) else current_act_idx
 
-            prior_state = char["story_state"] or ""
+            prior_state = (state["story_state"] if state else "") or ""
             advanced_beats = current_ms.get("story_beats_advanced") or []
             beats_note = f" [Beats: {', '.join(advanced_beats)}]" if advanced_beats else ""
             new_state = (prior_state + f"\n[Milestone: {current_ms.get('title', '')}] {outcome_summary or 'Completed.'}{beats_note}").strip()
-            new_milestone_number = (char["campaign_milestone_number"] or 0) + 1
+            new_milestone_number = ((state["campaign_milestone_number"] if state else 0) or 0) + 1
 
-            conn_ms = db.get_conn()
-            conn_ms.execute(
-                "UPDATE character SET story_state = ?, campaign_act_index = ?, campaign_milestone_number = ?, "
-                "milestone_advanced_turn = ?, current_milestone = NULL WHERE id = ?",
-                (new_state, new_act_idx, new_milestone_number, turn_number, char["id"]),
+            db.update_campaign_state(
+                char["id"], story_state=new_state, campaign_act_index=new_act_idx,
+                campaign_milestone_number=new_milestone_number, milestone_advanced_turn=turn_number,
+                current_milestone=None,
             )
-            conn_ms.commit()
-            conn_ms.close()
-            milestone_advanced_this_turn = True
             print(
                 f"[DEBUG] milestone_complete=true -> story_state appended, act {current_act_idx}->{new_act_idx}, "
                 f"milestone_number={new_milestone_number}, campaign_finished={campaign_finished}"
@@ -1248,29 +1538,36 @@ async def handle_chat_narrate() -> dict:
             else:
                 print("[DEBUG] Act 3 hoàn thành -> campaign kết thúc, không sinh milestone mới.")
 
-    # --- turns_since_event: đếm số lượt liên tiếp KHÔNG có "sự kiện lớn" (theo
-    # mechanics.event_occurred model tự báo) -> dùng để ép force_event ở đầu
-    # hàm lượt sau. Cột này trước đây không bao giờ được ghi (luôn = 0 chết
-    # cứng) khiến force_event vô tác dụng — giờ mới thực sự wiring theo đúng
-    # thiết kế ban đầu. Milestone vừa tiến cũng tính là 1 "sự kiện lớn" (reset
-    # về 0), vì bản thân việc đó đã đủ nặng đô cho lượt này.
-    event_occurred = bool(result["mechanics"].get("event_occurred", False)) or milestone_advanced_this_turn
-    new_turns_since_event = 0 if event_occurred else (char["turns_since_event"] or 0) + 1
-
-    # --- Context panel (ảnh location/quái/NPC mới xuất hiện) — pop "location"
-    # khỏi mechanics (chỉ tín hiệu nội bộ, giống milestone_complete, không phải
-    # thứ frontend cần trong response text). Ưu tiên entity mới (quái/NPC) hơn
-    # location vì "nóng" hơn về mặt kể chuyện nếu cả 2 cùng xảy ra 1 lượt.
+    # --- Context panel (ảnh location/quái/NPC/object mới xuất hiện) — pop
+    # "location"/"object" khỏi mechanics (chỉ tín hiệu nội bộ, giống
+    # milestone_complete, không phải thứ frontend cần trong response text). Ưu
+    # tiên: entity mới (quái/NPC) > object tương tác > location — cái nào "nóng"
+    # hơn về mặt kể chuyện thì lên panel nếu nhiều thứ cùng xảy ra 1 lượt.
     location_context = result["mechanics"].pop("location", None)
     if not isinstance(location_context, dict):
-        location_context = None
+        # location đôi khi model trả string thẳng (schema cho ["string","null"])
+        location_context = {"name": location_context} if isinstance(location_context, str) and location_context.strip() else None
+    object_context = result["mechanics"].pop("object", None)
+    object_name = object_context.strip() if isinstance(object_context, str) and object_context.strip() else None
 
-    # DM không còn tự viết description/visual_prompt cho entity/location MỚI
-    # nữa (xem system prompt ## ENTITIES / ## LOCATION) — resolve_visual() tra
-    # bảng Bible/Milestone trước (miễn phí), chỉ fallback qua 1 LLM call RIÊNG
-    # (model nhỏ) khi DM bịa tên hoàn toàn mới ngoài roster. Chỉ cần resolve
-    # đúng 1 lần cho context_update (thứ duy nhất thật sự dùng đến 2 field
-    # này), không phải cho mọi entity mới trong lượt.
+    # combat flag: lượt này có giao chiến thật -> nối COMBAT_STYLE vào ảnh
+    # entity (chỉ áp cho monster/npc trong imagegen).
+    combat_flag = contest_type in ("attack", "hazard")
+
+    # ĐANG GIAO CHIẾN (lượt này là đòn đánh, HOẶC còn quái/NPC thù địch sống
+    # trong cảnh) -> KHÓA panel ở kẻ địch: KHÔNG cho object/location chiếm panel.
+    # Bug thật: 8B tự set mechanics.object="sealed box" bừa giữa trận đánh Echo
+    # Wraith (story không hề nhắc), panel nhảy sang box + ảnh box lại lẫn hình
+    # quái do scene_snippet đang là đoạn combat. Trong trận chỉ entity MỚI (quái
+    # mới lao vào) mới được đổi panel; object/location đợi hết đánh nhau.
+    in_combat = combat_flag or any(e.get("hostile") for e in active_entities)
+
+    # DM không còn tự viết description/visual_prompt cho entity/location/object
+    # MỚI nữa (xem system prompt ## ENTITIES / ## LOCATION / ## INTERACTIVE
+    # OBJECTS) — resolve_visual() tra bảng Bible/Milestone trước (miễn phí), chỉ
+    # fallback qua 1 LLM call RIÊNG khi DM bịa tên mới ngoài roster. resolve_visual
+    # trả thêm name_vi (tên hiển thị tiếng Việt) — context_name vẫn lưu tên
+    # English canonical (cho cache ảnh + khớp race trong imagegen).
     context_update = None
     if new_entities:
         e = new_entities[-1]
@@ -1283,10 +1580,26 @@ async def handle_chat_narrate() -> dict:
         context_update = {
             "kind": kind,
             "name": e["name"],
+            "name_vi": resolved.get("name_vi") or e["name"],
             "description": resolved["description"],
             "visual_prompt": resolved["visual_prompt"],
+            "combat": combat_flag,
         }
-    elif location_context and location_context.get("name"):
+    elif object_name and not in_combat:
+        loop_ctx = asyncio.get_running_loop()
+        resolved = await loop_ctx.run_in_executor(
+            _BG_LLM_EXECUTOR, context_writer.resolve_visual,
+            "object", object_name, campaign_bible, current_milestone, result.get("story", ""),
+        )
+        context_update = {
+            "kind": "object",
+            "name": object_name,
+            "name_vi": resolved.get("name_vi") or object_name,
+            "description": resolved["description"],
+            "visual_prompt": resolved["visual_prompt"],
+            "combat": False,
+        }
+    elif location_context and location_context.get("name") and not in_combat:
         loc_name = str(location_context["name"]).strip()
         loop_ctx = asyncio.get_running_loop()
         resolved = await loop_ctx.run_in_executor(
@@ -1296,23 +1609,63 @@ async def handle_chat_narrate() -> dict:
         context_update = {
             "kind": "location",
             "name": loc_name,
+            "name_vi": resolved.get("name_vi") or loc_name,
             "description": resolved["description"],
             "visual_prompt": resolved["visual_prompt"],
+            "combat": False,
         }
+    else:
+        # Fallback location: model nhỏ gần như KHÔNG BAO GIỜ tự set
+        # mechanics.location, nên khi milestone chuyển sang khu vực mới, panel cứ
+        # kẹt ở entity/location cũ (vd hiện con quái đã bị hạ suốt nhiều lượt sau
+        # đó). Nếu lượt này không có entity mới lẫn location do model khai báo,
+        # mà panel đang "cũ" (đang hiện 1 quái/NPC KHÔNG còn sống, hoặc trống) và
+        # milestone hiện tại CÓ location -> đẩy panel về đúng location milestone.
+        # Không spam: sau khi đã hiện đúng location đó thì cur_ctx khớp -> thôi.
+        ms_loc = (current_milestone or {}).get("location") or {}
+        ms_loc_name = str(ms_loc.get("name") or "").strip()
+        if ms_loc_name:
+            cur_ctx_name = ((state["context_name"] if state else "") or "").strip()
+            cur_ctx_kind = ((state["context_kind"] if state else "") or "").strip()
+            stale = True
+            if cur_ctx_kind == "location" and cur_ctx_name.lower() == ms_loc_name.lower():
+                stale = False  # panel đã hiển thị đúng location milestone
+            elif cur_ctx_kind in ("monster", "npc") and cur_ctx_name:
+                conn_ctx = db.get_conn()
+                alive = conn_ctx.execute(
+                    "SELECT 1 FROM entity WHERE character_id = ? AND LOWER(name) = ? "
+                    "AND status = 'alive' LIMIT 1",
+                    (char["id"], cur_ctx_name.lower()),
+                ).fetchone()
+                conn_ctx.close()
+                stale = not alive  # còn hiện entity đang sống thì giữ, chỉ refresh khi nó đã đi/chết
+            if stale:
+                loop_ctx = asyncio.get_running_loop()
+                resolved = await loop_ctx.run_in_executor(
+                    _BG_LLM_EXECUTOR, context_writer.resolve_visual,
+                    "location", ms_loc_name, campaign_bible, current_milestone, result.get("story", ""),
+                )
+                context_update = {
+                    "kind": "location",
+                    "name": ms_loc_name,
+                    "name_vi": resolved.get("name_vi") or ms_loc_name,
+                    "description": resolved["description"],
+                    "visual_prompt": resolved["visual_prompt"],
+                    "combat": False,
+                }
+                print(f"[DEBUG] context fallback -> location milestone '{ms_loc_name}' (panel cũ đang kẹt ở {cur_ctx_kind}:{cur_ctx_name or '∅'})")
 
     if context_update:
-        conn_ctx = db.get_conn()
-        conn_ctx.execute(
-            "UPDATE character SET context_kind = ?, context_name = ?, context_desc = ?, "
-            "context_image_path = NULL WHERE id = ?",
-            (context_update["kind"], context_update["name"], context_update["description"], char["id"]),
+        db.update_campaign_state(
+            char["id"], context_kind=context_update["kind"], context_name=context_update["name"],
+            context_name_vi=context_update.get("name_vi") or context_update["name"],
+            context_desc=context_update["description"], context_image_path=None,
         )
-        conn_ctx.commit()
-        conn_ctx.close()
         # Bất đồng bộ hoàn toàn — KHÔNG await, response trả về frontend ngay lập
         # tức, ảnh xuất hiện sau (frontend tự poll /scene_context tới khi có).
         asyncio.create_task(imagegen.ensure_context_image(
-            char["id"], context_update["kind"], context_update["name"], context_update["visual_prompt"]
+            char["id"], context_update["kind"], context_update["name"], context_update["visual_prompt"],
+            combat=context_update.get("combat", False),
         ))
 
     conn = db.get_conn()
@@ -1325,14 +1678,40 @@ async def handle_chat_narrate() -> dict:
         "INSERT INTO history (role, content, turn_number) VALUES ('assistant', ?, ?)",
         (result.get("story", ""), turn_number),
     )
-    c.execute(
-        "UPDATE character SET last_result = ?, current_turn = ?, turns_since_event = ? WHERE id = ?",
-        (json.dumps(result, ensure_ascii=False), turn_number, new_turns_since_event, char["id"]),
-    )
     conn.commit()
     conn.close()
 
+    # Danh sách entity còn sống (HP hiện tại) để frontend vẽ thanh máu quái/NPC
+    # — trước đây backend track đúng nhưng UI không show, người chơi tưởng đánh
+    # "vô dụng" dù quái đang giảm máu dần. Gắn vào result (lưu luôn trong
+    # last_result để resume sau reload cũng có).
+    result["active_entities"] = _active_entities_for_ui(char["id"])
+    fresh_state = db.get_campaign_state(char["id"])
+    result["act_index"] = db.safe_int(fresh_state["campaign_act_index"], 0) if fresh_state else 0
+
+    db.update_campaign_state(char["id"], last_result=json.dumps(result, ensure_ascii=False), current_turn=turn_number)
+
     return result
+
+
+def _active_entities_for_ui(char_id: int) -> list:
+    """Rút gọn entity đang sống cho frontend (tên/HP/loại/thù địch). Chỉ trả
+    field cần để vẽ thanh máu, không lộ stats nội bộ (attack_bonus/damage_dice)."""
+    conn = db.get_conn()
+    rows = entities.get_active_entities(conn, char_id)
+    conn.close()
+    out = []
+    for e in rows:
+        out.append({
+            "key": e["key"],
+            "name": e["name"],
+            "type": e["entity_type"],
+            "hp": e["hp"],
+            "max_hp": e["max_hp"],
+            "hostile": bool(e["hostile"]),
+            "image_path": imagegen.entity_image_url(e["entity_type"], e["name"]),
+        })
+    return out
 
 
 async def handle_chat_retry() -> dict:
@@ -1347,7 +1726,8 @@ async def handle_chat_retry() -> dict:
     if not char:
         return {"error": "Chưa có nhân vật."}
 
-    last_turn_raw = char["last_turn_resolution"] if "last_turn_resolution" in char.keys() else None
+    state = db.get_campaign_state(char["id"])
+    last_turn_raw = state["last_turn_resolution"] if state else None
     last_turn = None
     if last_turn_raw:
         try:
@@ -1374,13 +1754,7 @@ async def handle_chat_retry() -> dict:
     _apply_consumption(last_turn["char_id"], last_turn["resolution"])
 
     last_turn["stage"] = "resolved"
-    conn2 = db.get_conn()
-    conn2.execute(
-        "UPDATE character SET pending_action = ? WHERE id = ?",
-        (json.dumps(last_turn, ensure_ascii=False), last_turn["char_id"]),
-    )
-    conn2.commit()
-    conn2.close()
+    db.update_campaign_state(last_turn["char_id"], pending_action=json.dumps(last_turn, ensure_ascii=False))
 
     result = await handle_chat_narrate()
     if isinstance(result, dict):
@@ -1398,12 +1772,18 @@ async def handle_start_game() -> dict:
     # trang / mất kết nối rồi gọi lại /start_game) -> tiếp tục phiên cũ,
     # KHÔNG tạo scene mở đầu mới (tránh việc model "quên" và narrate lại từ
     # đầu trong khi history/DB vẫn còn nguyên state cũ, gây gãy mạch truyện). ---
-    region = char["region"] if "region" in char.keys() and char["region"] else None
+    state = db.get_campaign_state(char["id"])
+    region = (state["region"] if state else None) or None
     if region:
-        last_result_raw = char["last_result"] if "last_result" in char.keys() else None
+        last_result_raw = state["last_result"] if state else None
         if last_result_raw:
             try:
-                return json.loads(last_result_raw)
+                resumed = json.loads(last_result_raw)
+                # Save cũ có thể chưa có 2 field này -> bổ sung khi resume để UI
+                # hiện đúng HP quái đang sống + nhãn Chương hiện tại.
+                resumed["active_entities"] = _active_entities_for_ui(char["id"])
+                resumed["act_index"] = db.safe_int(state["campaign_act_index"], 0) if state else 0
+                return resumed
             except (TypeError, json.JSONDecodeError):
                 pass  # last_result hỏng/thiếu -> rơi xuống fallback bên dưới
 
@@ -1427,14 +1807,10 @@ async def handle_start_game() -> dict:
 
     # --- Chưa từng chơi (region chưa chốt) -> chốt region ngẫu nhiên, tạo scene mở đầu mới ---
     region = lore.pick_random_region()
-    conn = db.get_conn()
-    c = conn.cursor()
-    c.execute("UPDATE character SET region = ? WHERE id = ?", (region, char["id"]))
-    conn.commit()
-    conn.close()
-    char = db.get_latest_character()  # reload để có region mới
+    db.update_campaign_state(char["id"], region=region)
+    state = db.get_campaign_state(char["id"])  # reload để có region mới
 
-    system_prompt = build_system_prompt(char)
+    system_prompt = build_system_prompt(char, state)
     opening_char = db.character_row_to_dict(char)
 
     # Nếu nhân vật có Campaign Bible + milestone 1 (đã sinh sẵn bởi
@@ -1442,8 +1818,8 @@ async def handle_start_game() -> dict:
     # PHẢI diễn ra đúng tại location của milestone 1 đó (không phải 1 vùng
     # Forgotten Realms bịa ngẫu nhiên) — milestone 1's location CHÍNH LÀ điểm
     # bắt đầu, bible không còn field starting_location riêng nữa.
-    campaign_bible = db._load_campaign_bible(char)
-    opening_milestone = db.load_current_milestone(char)
+    campaign_bible = db._load_campaign_bible()
+    opening_milestone = db.load_current_milestone(state)
     opening_location = (opening_milestone or {}).get("location") or {}
 
     if campaign_bible and opening_location.get("name"):
@@ -1480,6 +1856,13 @@ normal NARRATION STYLE (name only, no need to restate race/class).
 
 {"All encountered monsters and locations should fit this campaign's original world/setting from the CAMPAIGN BIBLE above, not the Forgotten Realms." if campaign_bible else "All encountered monsters and locations should be in the Forgotten Realms."}
 All monster and location names must be English.
+
+NO HOSTILE ENTITY IN THE OPENING: do NOT set mechanics.entities to any hostile NPC/monster this
+turn — the opening scene is a pure introduction (place, atmosphere, character established), not
+combat/an ambush. The first real encounter (which may be combat, but could just as well be a
+hostile NPC, a discovery, a social confrontation, or another event type entirely) begins on a
+LATER turn, driven by the CURRENT MILESTONE's objective — never in this very first scene. A
+non-hostile NPC glimpsed/mentioned in passing is fine if the scene calls for it.
 """
 
     # RAG lore context + world state (weather/day-night) TẠM THỜI TẮT — xem
@@ -1501,7 +1884,7 @@ All monster and location names must be English.
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": opening_instruction},
             ],
-            format="json",
+            format=DM_TURN_JSON_SCHEMA,
             options=OPTIONS,
             think=False,
         ),
@@ -1517,28 +1900,46 @@ All monster and location names must be English.
     result["mechanics"].pop("milestone_outcome_summary", None)
     result["mechanics"].pop("act_complete", None)
 
-    # RAG: nếu scene mở đầu đã giới thiệu quái/NPC/loot ngay lập tức, vẫn phải
-    # lưu vào DB — nếu không, lượt /chat kế tiếp sẽ không nhận ra key đó đã tồn tại.
+    # An toàn kép: dù đã dặn rõ trong opening_instruction, model 14B thỉnh
+    # thoảng vẫn lỡ đưa 1 quái/NPC THÙ ĐỊCH vào ngay cảnh mở đầu — cảnh mở đầu
+    # CHỈ giới thiệu, entity thù địch đầu tiên phải đợi 1 lượt /chat sau đó
+    # (do milestone dẫn dắt, đa dạng loại event chứ không riêng combat). Lọc
+    # bỏ triệt để ở đây thay vì chỉ tin prompt — NPC không thù địch vẫn được
+    # giữ lại (giới thiệu 1 NPC hiền lành trong cảnh mở đầu là hợp lý).
+    raw_entities = result["mechanics"].get("entities") or []
+    kept_entities = [e for e in raw_entities if isinstance(e, dict) and not e.get("hostile")]
+    if len(kept_entities) != len(raw_entities):
+        print(f"[DEBUG] handle_start_game: lọc bỏ {len(raw_entities) - len(kept_entities)} entity thù địch khỏi cảnh mở đầu")
+    result["mechanics"]["entities"] = kept_entities
+
+    # RAG: nếu scene mở đầu đã giới thiệu NPC/loot ngay lập tức, vẫn phải lưu
+    # vào DB — nếu không, lượt /chat kế tiếp sẽ không nhận ra key đó đã tồn tại.
     conn = db.get_conn()
     entities.apply_entity_changes(conn, char["id"], result["mechanics"].get("entities"), 0)
     entities.register_loot_drops(conn, char["id"], result["mechanics"].get("loot_dropped"), 0)
     conn.close()
 
-    # Context panel: cảnh mở đầu = location của milestone 1 -> ghi text ngay
-    # (đồng bộ, rẻ) rồi generate ảnh bất đồng bộ (KHÔNG await) — tái dùng
-    # đúng imagegen.ensure_context_image() đã build cho tính năng ảnh context.
+    # Context panel: cảnh mở đầu LUÔN ưu tiên location của milestone 1 (đây là
+    # nơi bắt đầu, người chơi cần thấy nó trước bất kỳ NPC nào xuất hiện ngay
+    # lượt đầu — khác các lượt /chat sau đó, nơi entity mới mới được ưu tiên).
+    # description resolve qua context_writer thay vì lấy thẳng
+    # opening_location["description"] — field đó LUÔN là tiếng Anh (rule
+    # LANGUAGE của milestone.py), lấy thẳng sẽ lộ tiếng Anh ra context panel;
+    # context_writer tra bảng khớp đúng location này rồi TỰ DỊCH sang tiếng
+    # Việt trước khi trả về (xem context_writer._translate_to_vi).
     if opening_location.get("name"):
-        conn_ctx = db.get_conn()
-        conn_ctx.execute(
-            "UPDATE character SET context_kind = 'location', context_name = ?, context_desc = ?, "
-            "context_image_path = NULL WHERE id = ?",
-            (opening_location["name"], opening_location.get("description", ""), char["id"]),
+        loop_ctx = asyncio.get_running_loop()
+        resolved = await loop_ctx.run_in_executor(
+            _BG_LLM_EXECUTOR, context_writer.resolve_visual,
+            "location", opening_location["name"], campaign_bible, opening_milestone, result.get("story", ""),
         )
-        conn_ctx.commit()
-        conn_ctx.close()
+        db.update_campaign_state(
+            char["id"], context_kind="location", context_name=opening_location["name"],
+            context_name_vi=resolved.get("name_vi") or opening_location["name"],
+            context_desc=resolved["description"], context_image_path=None,
+        )
         asyncio.create_task(imagegen.ensure_context_image(
-            char["id"], "location", opening_location["name"],
-            opening_location.get("visual_prompt") or opening_location["name"],
+            char["id"], "location", opening_location["name"], resolved["visual_prompt"],
         ))
 
     # Lưu vào DB (bao gồm last_result để /start_game gọi lại sau này resume đúng)
@@ -1548,17 +1949,67 @@ All monster and location names must be English.
         "INSERT INTO history (role, content, turn_number) VALUES ('assistant', ?, 0)",
         (result.get("story", ""),),
     )
-    c.execute(
-        "UPDATE character SET last_result = ?, current_turn = 0 WHERE id = ?",
-        (json.dumps(result, ensure_ascii=False), char["id"]),
-    )
     conn.commit()
     conn.close()
+
+    result["active_entities"] = _active_entities_for_ui(char["id"])
+    result["act_index"] = db.safe_int(state["campaign_act_index"], 0) if state else 0
+    db.update_campaign_state(char["id"], last_result=json.dumps(result, ensure_ascii=False), current_turn=0)
 
     return result  # Trả về cùng cấu trúc với /chat
 
 
-def apply_changes_to_db(char_id, changes):
+# Level-up: mỗi cấp cộng thêm chỉ số và hồi đầy máu/mana (phần thưởng cảm nhận
+# rõ ràng khi lên cấp). xp_target nhân dần để các cấp sau cần nhiều XP hơn.
+LEVELUP_HP_GAIN = 10
+LEVELUP_MANA_GAIN = 5
+LEVELUP_XP_TARGET_GROWTH = 1.5
+
+
+def _apply_level_ups(c, char_id) -> dict | None:
+    """Sau khi XP đã được cộng, xử lý lên cấp khi xp >= xp_target (có thể lên
+    nhiều cấp 1 lượt nếu nhận cục XP lớn — bug cũ: XP vọt +25 qua target mà
+    nhân vật đứng yên không lên cấp). Trả về thông tin để frontend báo, hoặc
+    None nếu không lên cấp."""
+    row = c.execute(
+        "SELECT level, xp, xp_target, max_hp, max_mana FROM character WHERE id = ?",
+        (char_id,),
+    ).fetchone()
+    if not row:
+        return None
+
+    level = db.safe_int(row["level"], 1)
+    xp = db.safe_int(row["xp"], 0)
+    xp_target = db.safe_int(row["xp_target"], 0)
+    max_hp = db.safe_int(row["max_hp"], 0)
+    max_mana = db.safe_int(row["max_mana"], 0)
+
+    levels_gained = 0
+    # xp_target <= 0 nghĩa là không cấu hình mốc XP -> không lên cấp (tránh vòng lặp vô hạn).
+    while xp_target > 0 and xp >= xp_target:
+        xp -= xp_target
+        level += 1
+        levels_gained += 1
+        max_hp += LEVELUP_HP_GAIN
+        max_mana += LEVELUP_MANA_GAIN
+        xp_target = max(1, round(xp_target * LEVELUP_XP_TARGET_GROWTH))
+
+    if levels_gained == 0:
+        return None
+
+    # Lên cấp -> hồi đầy máu/mana (dùng max_hp/max_mana mới).
+    c.execute(
+        "UPDATE character SET level = ?, xp = ?, xp_target = ?, max_hp = ?, max_mana = ?, "
+        "hp = ?, mana = ? WHERE id = ?",
+        (level, xp, xp_target, max_hp, max_mana, max_hp, max_mana, char_id),
+    )
+    print(f"[DEBUG] LEVEL UP! +{levels_gained} cấp -> lv{level}, xp {xp}/{xp_target}, max_hp {max_hp}, max_mana {max_mana}")
+    return {"levels_gained": levels_gained, "new_level": level}
+
+
+def apply_changes_to_db(char_id, changes) -> dict | None:
+    """Trả về thông tin level-up (hoặc None) để handle_chat_narrate gắn vào
+    mechanics cho frontend hiển thị."""
     conn = db.get_conn()
     c = conn.cursor()
 
@@ -1577,6 +2028,9 @@ def apply_changes_to_db(char_id, changes):
         db.safe_int(changes.get("xp", 0)),
         char_id,
     ))
+
+    # 2. Lên cấp nếu XP vượt mốc (làm ngay sau khi cộng XP, trước khi commit)
+    level_up_info = _apply_level_ups(c, char_id)
 
     items_added = changes.get("items_added") or []
     if items_added:
@@ -1598,6 +2052,7 @@ def apply_changes_to_db(char_id, changes):
 
     conn.commit()
     conn.close()
+    return level_up_info
 
 
 def _mentions_missing_item(user_input: str, char_dict: dict) -> str | None:

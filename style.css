@@ -556,49 +556,27 @@ textarea.input{ resize: vertical; font-family: var(--font-body); line-height: 1.
   margin: 0 0 22px;
 }
 
-.setup-steps{
-  list-style: none;
-  margin: 0 0 18px;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  text-align: left;
-}
-.setup-step{
-  font-size: 14px;
-  color: var(--muted);
-  padding: 10px 14px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
+.setup-progress-bar{
+  width: 100%;
+  height: 10px;
   background: var(--bg);
-  position: relative;
-  transition: color .2s ease, border-color .2s ease, background .2s ease;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 0 0 12px;
 }
-.setup-step::before{
-  content: '○';
-  margin-right: 8px;
-  font-family: var(--font-mono);
+.setup-progress-fill{
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--gold), var(--gold-bright));
+  border-radius: 999px;
+  transition: width .5s ease;
 }
-.setup-step.active{
-  color: var(--gold-bright);
-  border-color: var(--gold);
-  background: rgba(202,164,86,0.08);
-}
-.setup-step.active::before{
-  content: '◐';
-  animation: setup-step-spin 1s linear infinite;
-  display: inline-block;
-}
-.setup-step.done{
-  color: var(--sage-bright);
-  border-color: rgba(122,154,99,0.4);
-  background: rgba(122,154,99,0.06);
-}
-.setup-step.done::before{ content: '●'; color: var(--sage-bright); }
-
-@keyframes setup-step-spin{
-  to{ transform: rotate(360deg); }
+.setup-progress-label{
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0 0 18px;
+  text-align: left;
 }
 
 .setup-error{

@@ -34,7 +34,7 @@ def _npc_is_known(name: str, full_story_text: str) -> bool:
 
 
 def build_assistant_prompt(char: sqlite3.Row, active_entities: list, bible: dict | None,
-                            milestone_index: int, history_summary: str,
+                            act_index: int, history_summary: str,
                             recent_history_text: str, full_story_text: str) -> str:
     c = db.character_row_to_dict(char)
 
@@ -48,19 +48,26 @@ def build_assistant_prompt(char: sqlite3.Row, active_entities: list, bible: dict
     bible_block = "(chưa có campaign bible)"
     if bible:
         nb = campaign._normalize_bible(bible)
-        total_m = len(nb["story_milestones"])
-        idx = max(0, min(milestone_index, total_m - 1)) if total_m else 0
-        unlocked_tiers = campaign._milestone_tier_unlocked(idx, total_m)
+        acts = nb["acts"]
+        idx = max(0, min(act_index, len(acts) - 1))
+        current_act = acts[idx]
 
         # NPC: chỉ liệt kê những người ĐÃ xuất hiện trong truyện — không lộ
         # trước danh tính/vai trò của NPC người chơi chưa từng gặp. Trường
-        # "secret" KHÔNG BAO GIỜ được đưa vào đây dù NPC đã biết, vì đó là
-        # twist dành riêng cho DM, không phải thứ trợ lý được kể thẳng.
-        known_npcs = [n for n in nb["npcs"] if _npc_is_known(n["name"], full_story_text)]
+        # "secrets"/động cơ ngầm của antagonist KHÔNG BAO GIỜ được đưa vào
+        # đây dù NPC đã biết, vì đó là twist dành riêng cho DM.
+        known_npcs = [n for n in nb["characters"]["key_npcs"] if _npc_is_known(n["name"], full_story_text)]
         npc_lines = "\n".join(
-            f"- {n['name']} ({n['role']}): {n['desc']} | động cơ: {n['motivation']}"
+            f"- {n['name']} ({n['role']}): {n['appearance']} | động cơ: {n['motivation']}"
             for n in known_npcs
         ) or "Người chơi chưa gặp NPC nào có tên riêng trong campaign bible tính tới lúc này."
+
+        antagonist = nb["characters"]["main_antagonist"]
+        antagonist_line = (
+            f"{antagonist['name']}: {antagonist['desc']}"
+            if _npc_is_known(antagonist["name"], full_story_text)
+            else "Người chơi chưa từng nghe tới danh tính của thế lực đứng sau mọi chuyện."
+        )
 
         # Quái: chỉ liệt kê loài đã thực sự chạm trán (có trong bảng entity),
         # tránh hé trước tên/loài quái sắp gặp.
@@ -78,35 +85,32 @@ def build_assistant_prompt(char: sqlite3.Row, active_entities: list, bible: dict
         encountered_monster_names |= {row["name"] for row in past_monsters}
         monster_lines = ", ".join(sorted(encountered_monster_names)) or "Người chơi chưa chạm trán quái nào trong campaign này."
 
-        # Milestone: chỉ hiện mốc ĐÃ QUA + mốc HIỆN TẠI — không hé mô tả các
-        # mốc truyện tương lai (đó chính là spoil cốt truyện sắp tới).
-        milestone_lines = "\n".join(
-            ("[HIỆN TẠI] " if i == idx else "[ĐÃ QUA] ") + f"{m['title']} — {m['description']}"
-            for i, m in enumerate(nb["story_milestones"]) if i <= idx
-        ) or "Chưa có mốc truyện nào được ghi nhận."
+        # Act: chỉ hiện act HIỆN TẠI — không hé purpose/exit_condition của các
+        # act SAU (đó chính là spoil cốt truyện sắp tới).
+        act_line = f"Act {current_act['act']}/3 (hiện tại): {current_act['purpose']} | kết thúc khi: {current_act['exit_condition']}"
+
+        # Milestone hiện tại (disposable, sinh dần — xem agents/milestone.py):
+        # chỉ hiện objective/story_purpose, KHÔNG hiện required_reveal/
+        # forbidden_reveal/success_condition/failure_condition — những field
+        # đó dành cho DM tự vận hành, không phải thứ kể thẳng cho người chơi.
+        current_milestone = db.load_current_milestone(db.get_campaign_state(char["id"]))
+        milestone_line = (
+            f"{current_milestone['title']} — mục tiêu: {current_milestone['objective']}"
+            if current_milestone else "(đang chuẩn bị mốc truyện tiếp theo...)"
+        )
 
         faction_lines = "\n".join(
             f"- {f['name']}: mục tiêu {f['goal']} | quan hệ với người chơi: {f['relationship_to_player']}"
-            for f in nb["factions"]
+            for f in nb["world"]["major_factions"]
         ) or "Không có"
-
-        # Bí mật/twist: CHỈ hiện đúng những gì đã "mở khoá" theo tier hiện tại
-        # (public/mid_game/late_game/finale) — đúng logic DM chính đang dùng,
-        # để trợ lý không bao giờ đi trước câu chuyện.
-        secrets_by_id = {s["id"]: s for s in nb["secrets"]}
-        unlocked_secret_ids = [
-            sid for tier in unlocked_tiers
-            for sid in (nb["revelation_order"].get(tier) or [])
-            if sid in secrets_by_id
-        ]
-        secret_lines = "\n".join(f"- {secrets_by_id[sid]['description']}" for sid in unlocked_secret_ids) or "Chưa có bí mật nào được tiết lộ trong truyện tính tới lúc này."
 
         bible_block = (
             f"NPC người chơi đã gặp (KHÔNG được bịa thêm NPC ngoài danh sách này):\n{npc_lines}\n\n"
+            f"Thế lực đứng sau mọi chuyện (chỉ nếu đã lộ danh tính trong truyện): {antagonist_line}\n\n"
             f"Quái vật đã chạm trán: {monster_lines}\n\n"
-            f"Mốc truyện đã đi qua (KHÔNG được tiết lộ mốc nào sau mốc [HIỆN TẠI]):\n{milestone_lines}\n\n"
-            f"Phe phái đã biết:\n{faction_lines}\n\n"
-            f"Bí mật/twist đã lộ ra trong truyện:\n{secret_lines}"
+            f"{act_line}\n\n"
+            f"Mốc truyện hiện tại: {milestone_line}\n\n"
+            f"Phe phái đã biết:\n{faction_lines}"
         )
 
     summary_block = history_summary or "(chưa có tóm tắt — truyện còn ngắn)"
@@ -165,12 +169,13 @@ async def handle_ask(data: dict) -> dict:
     ) or "(chưa có diễn biến nào)"
     full_story_text = "\n".join(row["content"] or "" for row in story_rows)
 
-    history_summary = char["history_summary"] if "history_summary" in char.keys() else ""
-    bible = db._load_campaign_bible(char)
-    milestone_index = char["campaign_milestone_index"] if "campaign_milestone_index" in char.keys() else 0
+    state = db.get_campaign_state(char["id"])
+    history_summary = (state["history_summary"] if state else "") or ""
+    bible = db._load_campaign_bible()
+    act_index = (state["campaign_act_index"] if state else 0) or 0
 
     system_prompt = build_assistant_prompt(
-        char, active_entities, bible, milestone_index, history_summary, recent_history_text,
+        char, active_entities, bible, act_index, history_summary, recent_history_text,
         full_story_text,
     )
 

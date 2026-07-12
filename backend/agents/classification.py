@@ -13,7 +13,10 @@ import random
 
 import ollama
 
-CLASSIFICATION_MODEL = "qwen3:14b"
+# CLASSIFICATION_MODEL = "qwen3:14b"
+
+CLASSIFICATION_MODEL = "qwen3:8b"
+
 CLASSIFICATION_OPTIONS = {"num_ctx": 4096, "num_predict": 200}
 
 
@@ -146,6 +149,35 @@ Output:
 {{"needs_roll": true or false based on player action, "attribute": "dex", "advantage_state": "normal", "advantage_reason": null, "dc": 12, "item_or_skill_used": "Item or Skill used, if not is null", "item_or_skill_owned": true, "contest_type": "attack"|"hazard"|"none", "target_key": "exact key from Active entities list, or null"}}
 
 advantage_reason format when not null: {{"type": "strength"|"weakness"|"class"|"race"|"item", "name": "exact name from sheet"}}"""
+
+
+def _action_references_used(used_name, user_input, char_dict) -> bool:
+    """Kiểm tra hành động người chơi có THỰC SỰ viện dẫn skill/item mà classify
+    báo là 'đã dùng' hay không. Model classify (8b) hay tự gán item_or_skill_used
+    = 1 skill dù người chơi chỉ 'quan sát/rút lui' — dẫn tới trừ Mana + hiện
+    'Sử dụng: <skill>' oan (bug thật quan sát được nhiều lượt). Tên skill/item
+    rất đặc trưng (vd 'Lễ Thánh Hiến'): nếu KHÔNG token nào của nó xuất hiện
+    trong câu hành động, coi như model bịa -> bỏ. So khớp cả tên vi/en/key."""
+    used_l = (used_name or "").strip().lower()
+    if not used_l:
+        return False
+    text = (user_input or "").strip().lower()
+    if not text:
+        return False
+
+    matched = next(
+        (x for x in (char_dict.get("skills", []) + char_dict.get("items", []))
+         if _item_matches(x, used_name)),
+        None,
+    )
+    candidates = [used_l]
+    if isinstance(matched, dict):
+        candidates += [matched.get("vi"), matched.get("en"), matched.get("key")]
+    for cand in candidates:
+        cand = (cand or "").strip().lower()
+        if len(cand) >= 4 and cand in text:
+            return True
+    return False
 
 
 def _reason_is_valid(reason, char_dict):
@@ -446,6 +478,20 @@ def classify_action(model: str, options: dict, user_input: str, char_dict: dict,
     classification["advantage_state"] = adv_state
     classification["advantage_reason"] = adv_reason
     classification["dc"] = dc
+
+    # Guard bug 'trừ mana/hiện Sử dụng oan': chỉ giữ item_or_skill_used nếu câu
+    # hành động thực sự nhắc tới skill/item đó. Chuẩn hoá luôn chuỗi rác model
+    # hay trả ("null"/"none"/"") về None để không lộ ra 'Sử dụng: null' ở UI và
+    # không kích hoạt tiêu hao tài nguyên.
+    used_raw = (classification.get("item_or_skill_used") or "").strip()
+    if used_raw.lower() in ("", "null", "none", "n/a", "không", "khong"):
+        classification["item_or_skill_used"] = None
+    elif not _action_references_used(used_raw, user_input, char_dict):
+        print(
+            f"[DEBUG] classify gán item_or_skill_used='{used_raw}' nhưng hành động không "
+            f"viện dẫn tên đó -> bỏ (tránh trừ mana/hiện 'Sử dụng' oan)"
+        )
+        classification["item_or_skill_used"] = None
 
     print(f"[DEBUG] classify result: {classification}")
     return classification
